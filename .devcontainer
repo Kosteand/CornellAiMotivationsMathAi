@@ -1,0 +1,32 @@
+{
+    "name": "Gymnasium RL Project",
+    "dockerComposeFile": [
+        "../docker-compose.yml"
+    ],
+    "service": "rl-env",
+    "workspaceFolder": "/app",
+    
+    // Configures VS Code settings inside the container
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",         // Python support
+                "ms-python.vscode-pylint",  // Linting
+                "ms-toolsai.jupyter",       // If you want to use Notebooks
+                "njpwerner.autodocstring",  // Good for team documentation
+                "kevinrose.vsc-python-indent"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/bin/python3",
+                "python.linting.enabled": true,
+                "python.analysis.typeCheckingMode": "basic"
+            }
+        }
+    },
+
+    // Ensures the container has the right permissions for your local user
+    "remoteUser": "root",
+
+    // Runs commands after the container is created
+    "postCreateCommand": "pip3 install --upgrade pip"
+}

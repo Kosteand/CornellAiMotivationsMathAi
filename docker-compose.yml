@@ -1,0 +1,22 @@
+services:
+  rl-env:
+    build: .
+    image: gymnasiumdocker:latest
+    # This mounts your current folder to /app inside the container
+    volumes:
+      - .:/app
+    # Keeps the container running so you can "exec" into it
+    tty: true 
+    stdin_open: true
+    # GPU Support (NVIDIA)
+    #deploy:
+     # resources:
+      #  reservations:
+       #   devices:
+       #     - driver: nvidia
+       #       count: all
+        #      capabilities: [gpu]
+    # Environment variables for Python
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
