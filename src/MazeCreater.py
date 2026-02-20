@@ -2,7 +2,7 @@ import numpy as np
 import random
 from openpyxl import Workbook
 import pandas as pd
-def generate_maze(width=127, height=127, iterations=5, diagonal_density=0):
+def generate_maze(width=127, height=127, iterations=5, diagonal_density=0.2):
     maze = np.full((height, width), 1, dtype=object)
     rooms = []
 
@@ -68,4 +68,4 @@ def generate_maze(width=127, height=127, iterations=5, diagonal_density=0):
 
 # Usage
 maze_127 = generate_maze()
-np.savetxt("output22.csv", maze_127, delimiter=",", fmt='%d')
+np.savetxt("output1.csv", maze_127, delimiter=",", fmt='%d')

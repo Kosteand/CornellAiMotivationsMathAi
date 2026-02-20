@@ -17,7 +17,6 @@ class MazeEnv(gym.Env):
         self.current_pos = self.spawn_pos #spawn position is current posiiton of agent
         self.num_rows, self.num_cols = self.maze.shape
         
-         # Observation space is grid of size:rows x columns
          
         self.observation_space = spaces.Dict({"positionX": spaces.Discrete(self.num_rows), "positionY": spaces.Discrete(self.num_cols),
                                                "targetX":spaces.Discrete(self.num_rows), "targetY":spaces.Discrete(self.num_cols),
@@ -31,7 +30,6 @@ class MazeEnv(gym.Env):
         self.action_space = spaces.Discrete(4)  
 
 
-        # Initialize Pygame
         pygame.init()
         self.cell_size = 125
 
@@ -54,11 +52,11 @@ class MazeEnv(gym.Env):
         elif action == 3:  # Right
             new_pos[1] += 1
 
-        # Check if the new position is valid
+        # Check if the new position is valid TODO
         if self._is_valid_position(new_pos):
             self.current_pos = new_pos
 
-        # Reward function
+        # Reward function TODO
         if np.array_equal(self.current_pos, self.goal_pos):
             reward = 1.0
             done = True
@@ -79,7 +77,7 @@ class MazeEnv(gym.Env):
         if self.maze[row, col] == 1:
             return False
         return True
-
+#TODO 
     def render(self):
         # Clear the screen
         self.screen.fill((255, 255, 255))  
