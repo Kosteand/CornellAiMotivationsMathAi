@@ -113,3 +113,6 @@ class LInftyDistanceFromMiddle():
 
     def getRange(self) -> tuple[float, float]:
         return (0.0, float(np.amax(np.abs(self.topRight - self.midPoint))))
+    
+    
+    

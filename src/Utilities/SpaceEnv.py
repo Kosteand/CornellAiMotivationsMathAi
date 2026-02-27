@@ -36,9 +36,10 @@ class MazeEnv(gym.Env):
         self.spawn = spawn
         self.cords = spawn
         self.observation_space = spaces.Dict({"positionX": spaces.Discrete(self.num_rows), "positionY": spaces.Discrete(self.num_cols),
-                                               "targetX":spaces.Discrete(self.num_rows), "targetY":spaces.Discrete(self.num_cols),
                                                "distU":spaces.Discrete(self.num_rows), "distD":spaces.Discrete(self.num_rows),
                                                "distR":spaces.Discrete(self.num_cols), "distL":spaces.Discrete(self.num_rows),
+                                               "typeU":spaces.Discrete(2), "typeD":spaces.Discrete(2),
+                                               "typeR":spaces.Discrete(2), "typeL":spaces.Discrete(2),
                                                "extras":spaces.Box(low=-np.inf, high=np.inf,shape=(len(args),), dtype=np.float32)
                                                })
 
