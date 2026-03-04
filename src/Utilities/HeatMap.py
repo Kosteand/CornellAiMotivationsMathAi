@@ -1,4 +1,5 @@
 import numpy as np
+import random
 from numpy.typing import NDArray
 from typing import Protocol
 
@@ -7,6 +8,21 @@ class HeatMappable(Protocol):
         ...
     def getRange(self) -> tuple[float, float]:
         ...
+    def generate_heatmap(obj, noise=0): #current impl uses floats
+      #current implementation is probably slow
+      shape = [int(obj.topRight[i] - obj.lowLeft[i] + 1) for i in range(obj.dimension)]
+      heatmap = np.zeros(shape, dtype=float)
+      for idx in np.ndindex(*shape):
+        coord = np.array([obj.lowLeft[i] + idx[i] for i in range(obj.dimension)], dtype=int)
+        heatmap[idx] = obj.map(coord)
+      
+      #add noise
+      heatmap_average = np.mean(heatmap)
+      heatmap_std = np.std(heatmap)
+      for idx in np.ndindex(*shape):
+        heatmap[idx]=random.uniform(-noise*heatmap_std, noise*heatmap_std)
+      
+        
 
 class DistanceTarget():
     def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
