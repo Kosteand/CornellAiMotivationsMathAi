@@ -4,18 +4,22 @@ from gym import spaces
 import pygame 
 import MazeCreater
 from openpyxl import Workbook 
+import matplotlib.pyplot as plt
+import Utilities.HeatMap
 maze_127 = MazeCreater.generate_sparse_maze(127, 127, density=0.2)
 np.savetxt("output.csv", maze_127, delimiter=",", fmt='%d')
 
 
 class MazeEnv(gym.Env):
-    def __init__(self, maze, *args: npt.NDArray[np.int_]):
+    def __init__(self, spawn: npt.NDArray[np.int_], targets: npt.NDArray[np.int_], *args: Utilities.HeatMap.HeatMappable):
         super(MazeGameEnv, self).__init__()
         self.maze = np.array(maze)  # Maze is a 2D numpy array
         self.spawn_pos = np.where(self.maze == -2)  # Spawn position
         self.target_pos = np.where(self.maze == -1)  # Target position
         self.current_pos = self.spawn_pos #spawn position is current posiiton of agent
         self.num_rows, self.num_cols = self.maze.shape
+        
+        self.heatmaps = args
         
          
         self.observation_space = spaces.Dict({"positionX": spaces.Discrete(self.num_rows), "positionY": spaces.Discrete(self.num_cols),
@@ -24,21 +28,32 @@ class MazeEnv(gym.Env):
                                                "distR":spaces.Discrete(self.num_cols), "distL":spaces.Discrete(self.num_rows),
                                                "extras":spaces.Box(low=-np.inf, high=np.inf,shape=(len(args),), dtype=np.float32)
                                                })
-
-
+        
+        
         # 0=up, 1=down, 2=left, 3=right
         self.action_space = spaces.Discrete(4)  
 
 
-        pygame.init()
         self.cell_size = 125
+        
+        
 
-        # setting display size
-        self.screen = pygame.display.set_mode((self.num_cols * self.cell_size, self.num_rows * self.cell_size))
 
     def reset(self):
         self.current_pos = self.start_pos
         return self.current_pos
+    
+    def visualize(self, mapInt, ):
+        fig, ax = plt.subplots()
+        heatMapPlot = ax.imshow(data, cmap='viridis', interpolation='nearest')
+        
+        plt.colorbar(heatmap_plot, ax=ax, label='Value')
+
+        ax.set_xlabel('X-axis Label')
+        ax.set_ylabel('Y-axis Label')
+        ax.set_title('My Matplotlib Heatmap')
+
+        plt.savefig("a_figure_png")
 
     def step(self, action):
         # Move the agent based on the selected action
@@ -104,3 +119,10 @@ class MazeEnv(gym.Env):
                     pygame.draw.rect(self.screen, (0, 0, 255), (cell_left, cell_top, self.cell_size, self.cell_size))
 
         pygame.display.update()  # Update the display
+    def getColorGrad(val, minVal, maxVal):
+        adjustedVal = (val - minVal)/(maxVal - minVal)
+        r = int(255*adjustedVal)
+        g = 0
+        b = int(255*(1-adjustedVal))
+        return(r, g, b)
+    

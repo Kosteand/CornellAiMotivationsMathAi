@@ -114,5 +114,17 @@ class LInftyDistanceFromMiddle():
     def getRange(self) -> tuple[float, float]:
         return (0.0, float(np.amax(np.abs(self.topRight - self.midPoint))))
     
+class DirectionWrap():
+    def __init__(self,map:HeatMappable,cordArr: NDArray[np.int_]):
+        self.map = map
+        self.cordArr = cordArr
+        
+        
+    def map(self, cordArr: NDArray[np.int_]) -> np.int_:
+        return self.map.map(cordArr+self.cordArr)
+        
+    def getRange(self)-> tuple[float, float]:
+        return self.map.range
+    
     
     

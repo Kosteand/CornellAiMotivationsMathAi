@@ -10,6 +10,12 @@ np.savetxt("output.csv", maze_127, delimiter=",", fmt='%d')
 
 
 class MazeEnv(gym.Env):
+    #lowerLeft: The corner of the world that has the lowest possible coords.
+    #uppeRight: Corner with highest possible coords
+    #spawn: Where the agent begins
+    #targetCords: List of coords of each target
+    #targetAwards: List of the awards of each 
+    #*args: List of heatMaps (probably from HeatMap.py)
     def __init__(self,lowerLeft: npt.NDArray[np.int_], upperRight: npt.NDArray[np.int_], 
                  spawn: npt.NDArray[np.int_],targetAwards: npt.NDArray[np.int_],
                  targetCords : npt.NDArray[np.int_], *args: HeatMappable):
@@ -24,7 +30,7 @@ class MazeEnv(gym.Env):
         if np.any(self.spawn < self.lowerLeft) or np.any(self.spawn > self.upperRight):
             raise ValueError("Spawn point is outside the environment boundaries.")
 
-# Check if all target coordinates are within bounds
+        # Check if all target coordinates are within bounds
         for coord in self.targetCords:
             if np.any(coord < self.lowerLeft) or np.any(coord > self.upperRight):
              raise ValueError(f"Target coordinate {coord} is outside the environment boundaries.")
@@ -44,45 +50,91 @@ class MazeEnv(gym.Env):
                                                })
 
 
-        # 0=up, 1=down, 2=left, 3=right
-        self.action_space = spaces.Discrete(4)  
+        # 0=up, 1=down, 2=left, 3=right for 2-d
+        self.action_space = spaces.Discrete(2*len())  
+        
 
 
-        pygame.init()
-        self.cell_size = 125
-
-        # setting display size
-        self.screen = pygame.display.set_mode((self.num_cols * self.cell_size, self.num_rows * self.cell_size))
-
+    
     def reset(self):
-        self.current_pos = self.start_pos
+        self.current_pos = self.spawn
         return self.current_pos
+    
+    
+    def visualize(self, mapInt, coord1Int, coord2Int, fixedInts):
+        target_map = self.maps[mapInt]
+
+        ax1Range = np.arange(self.lowerLeft[coord1Int], self.upperRight[coord1Int] + 1)
+        ax2Range = np.arange(self.lowerLeft[coord2Int], self.upperRight[coord2Int] + 1)
+
+        zVal = np.zeros((len(axis2_range), len(axis1_range)))
+    
+
+        for idx2, val2 in enumerate(ax2Range):
+            for idx1, val1 in enumerate(ax1Range):
+                # Start with a base coordinate the spawn or lowerLeft and voerwrite from there
+                current_coord = self.lowerLeft.copy()
+            
+                # Use the fixedInts provides in parameters
+                for axis, val in fixedInts.items():
+                    current_coord[axis] = val
+            
+                # These are the two dimensions to be displayed 
+                current_coord[coord1Int] = val1
+                current_coord[coord2Int] = val2
+            
+                # Call the actual mappable method to get the value
+                zVal[idx2, idx1] = target_map.map(current_coord)
+
+        #Plotting
+        fig, ax = plt.subplots(figsize=(8, 6))
+    
+        # Gemini told me to put this here ngl, does some sort of aligning
+        im = ax.imshow(zVal, 
+                    extent=[ax1Range[0], ax1Range[-1], ax2Range[0], ax2Range[-1]], 
+                    origin='lower', 
+                    aspect='auto',
+                    cmap='viridis')
+    
+        plt.colorbar(im, ax=ax, label='Value')
+        ax.set_xlabel(f'Dimension {coord1Int}')
+        ax.set_ylabel(f'Dimension {coord2Int}')
+        ax.set_title(f'Heatmap {mapInt} Slice (Fixed dims: {fixedInts})')
+
+        plt.savefig("a_figure.png")
+        plt.close(fig) 
+
 
     def step(self, action):
-        # Move the agent based on the selected action
-        new_pos = np.array(self.current_pos)
-        if action == 0:  # Up
-            new_pos[0] -= 1
-        elif action == 1:  # Down
-            new_pos[0] += 1
-        elif action == 2:  # Left
-            new_pos[1] -= 1
-        elif action == 3:  # Right
-            new_pos[1] += 1
-
-        # Check if the new position is valid TODO
-        if self._is_valid_position(new_pos):
-            self.current_pos = new_pos
-
-        # Reward function TODO
-        if np.array_equal(self.current_pos, self.goal_pos):
-            reward = 1.0
-            done = True
+        new_pos = self.current_pos.copy()
+    
+        # 1. Determine which dimension to move in
+        # (e.g., if action is 0 or 1, dim is 0; if 2 or 3, dim is 1...)
+        dim = action // 2
+    
+        # 2. Determine direction: Even actions decrease, Odd actions increase
+        # (or vice-versa, depending on your preference)
+        if action % 2 == 0:
+            new_pos[dim] -= 1
         else:
-            reward = 0.0
-            done = False
+            new_pos[dim] += 1
+        
+        # 3. Add Boundary Checking (Crucial for N-dims)
+        if np.all(new_pos >= self.lowerLeft) and np.all(new_pos <= self.upperRight):
+            self.current_pos = new_pos
+            # Check if the new position is valid TODO
+            if self._is_valid_position(new_pos):
+                self.current_pos = new_pos
 
-        return self.current_pos, reward, done, {}
+            # Reward function TODO
+            if np.array_equal(self.current_pos, self.goal_pos):
+                reward = 1.0
+                done = True
+            else:
+                reward = 0.0
+                done = False
+
+            return self.current_pos, reward, done, {}
 
     def _is_valid_position(self, pos):
         row, col = pos

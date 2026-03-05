@@ -25,4 +25,3 @@ with Display(visible=0, size=(1400, 900)) as disp:
             obs, info = env.reset()
 
     env.close()
-    print("Training finished. Check the /videos folder for the MP4!")
