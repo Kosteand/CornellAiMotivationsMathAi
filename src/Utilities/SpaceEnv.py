@@ -1,12 +1,10 @@
 import gymnasium as gym
 import numpy as np 
-from gym import spaces
-import pygame 
-import MazeCreater
+from gymnasium import spaces
 from openpyxl import Workbook 
 from Utilities.HeatMap import HeatMappable
-maze_127 = MazeCreater.generate_sparse_maze(127, 127, density=0.2)
-np.savetxt("output.csv", maze_127, delimiter=",", fmt='%d')
+import matplotlib.pyplot as plt
+import numpy.typing as npt
 
 
 class MazeEnv(gym.Env):
@@ -19,11 +17,22 @@ class MazeEnv(gym.Env):
     def __init__(self,lowerLeft: npt.NDArray[np.int_], upperRight: npt.NDArray[np.int_], 
                  spawn: npt.NDArray[np.int_],targetAwards: npt.NDArray[np.int_],
                  targetCords : npt.NDArray[np.int_], *args: HeatMappable):
-        super(MazeGameEnv, self).__init__()
-        if not(lowerLeft.shape == upperRight.shape and upperRight.shape == spawn.shape 
-               and spawn.shape == targetCoords.shape[1:] and targetCoords.shape[0] ==targetAwards[0]):
-                        raise Exception("Not proper array dimensions")
-
+        super(MazeEnv, self).__init__()
+        self.lowerLeft = lowerLeft
+        self.upperRight = upperRight
+        self.targetCords = targetCords
+        self.targetAwards = targetAwards
+        self.maps = np.array(args)
+        self.spawn = spawn
+        self.cords = spawn
+        if not (self.lowerLeft.shape == (2,) and 
+                self.upperRight.shape == (2,) and 
+                self.spawn.shape == (2,) and 
+                self.targetCords.shape[1:] == (2,) and 
+                len(self.targetCords) == len(self.targetAwards)):
+                    raise Exception("Not proper array dimensions")
+        self.num_cols = self.upperRight[0] - self.lowerLeft[0] + 1
+        self.num_rows = self.upperRight[1] - self.lowerLeft[1] + 1
         if np.any(lowerLeft >= upperRight):
             raise ValueError("lowerLeft must be strictly less than upperRight in all dimensions.")
         # Check if spawn is within bounds
@@ -34,24 +43,18 @@ class MazeEnv(gym.Env):
         for coord in self.targetCords:
             if np.any(coord < self.lowerLeft) or np.any(coord > self.upperRight):
              raise ValueError(f"Target coordinate {coord} is outside the environment boundaries.")
-        self.lowerLeft = lowerLeft
-        self.upperRight = upperRight
-        self.targetCords = targetCords
-        self.targetAwards = targetAwards
-        self.maps = np.array(args)
-        self.spawn = spawn
-        self.cords = spawn
+    
         self.observation_space = spaces.Dict({"positionX": spaces.Discrete(self.num_rows), "positionY": spaces.Discrete(self.num_cols),
                                                "distU":spaces.Discrete(self.num_rows), "distD":spaces.Discrete(self.num_rows),
                                                "distR":spaces.Discrete(self.num_cols), "distL":spaces.Discrete(self.num_rows),
-                                               "typeU":spaces.Discrete(2), "typeD":spaces.Discrete(2),
-                                               "typeR":spaces.Discrete(2), "typeL":spaces.Discrete(2),
+                                               "typeU":spaces.Discrete(3), "typeD":spaces.Discrete(3),
+                                               "typeR":spaces.Discrete(3), "typeL":spaces.Discrete(3),
                                                "extras":spaces.Box(low=-np.inf, high=np.inf,shape=(len(args),), dtype=np.float32)
                                                })
 
 
-        # 0=up, 1=down, 2=left, 3=right for 2-d
-        self.action_space = spaces.Discrete(2*len())  
+        # 0=up, 1=down, 2=left, 3=right 
+        self.action_space = spaces.Discrete(4)  
         
 
 
@@ -61,49 +64,49 @@ class MazeEnv(gym.Env):
         return self.current_pos
     
     
-    def visualize(self, mapInt, coord1Int, coord2Int, fixedInts):
+    def visualize(self, mapInt):
+        # 1. Access the specific heatmap
         target_map = self.maps[mapInt]
 
-        ax1Range = np.arange(self.lowerLeft[coord1Int], self.upperRight[coord1Int] + 1)
-        ax2Range = np.arange(self.lowerLeft[coord2Int], self.upperRight[coord2Int] + 1)
+        # 2. Define the discrete ranges for X (dim 0) and Y (dim 1)
+        # We use lowerLeft and upperRight which we've enforced are shape (2,)
+        x_range = np.arange(self.lowerLeft[0], self.upperRight[0] + 1)
+        y_range = np.arange(self.lowerLeft[1], self.upperRight[1] + 1)
 
-        zVal = np.zeros((len(axis2_range), len(axis1_range)))
-    
+        # 3. Initialize the Z-value grid (Y rows, X columns)
+        zVal = np.zeros((len(y_range), len(x_range)))
 
-        for idx2, val2 in enumerate(ax2Range):
-            for idx1, val1 in enumerate(ax1Range):
-                # Start with a base coordinate the spawn or lowerLeft and voerwrite from there
-                current_coord = self.lowerLeft.copy()
+        # 4. Fill the grid
+        # We loop through Y first because that represents the rows in the image/array
+        for idx_y, val_y in enumerate(y_range):
+            for idx_x, val_x in enumerate(x_range):
+                # Create the 2D coordinate for this specific cell
+                current_coord = np.array([val_x, val_y])
             
-                # Use the fixedInts provides in parameters
-                for axis, val in fixedInts.items():
-                    current_coord[axis] = val
-            
-                # These are the two dimensions to be displayed 
-                current_coord[coord1Int] = val1
-                current_coord[coord2Int] = val2
-            
-                # Call the actual mappable method to get the value
-                zVal[idx2, idx1] = target_map.map(current_coord)
+                # Call the mapping function for this single point
+                zVal[idx_y, idx_x] = target_map.map(current_coord)
 
-        #Plotting
+        # 5. Plotting
         fig, ax = plt.subplots(figsize=(8, 6))
     
-        # Gemini told me to put this here ngl, does some sort of aligning
+        # extent: maps the array indices to the actual coordinate values
+        # [xmin, xmax, ymin, ymax]
+        # origin='lower': puts (0,0) at the bottom left
         im = ax.imshow(zVal, 
-                    extent=[ax1Range[0], ax1Range[-1], ax2Range[0], ax2Range[-1]], 
+                    extent=[x_range[0], x_range[-1], y_range[0], y_range[-1]], 
                     origin='lower', 
-                    aspect='auto',
+                    aspect='equal', 
                     cmap='viridis')
     
-        plt.colorbar(im, ax=ax, label='Value')
-        ax.set_xlabel(f'Dimension {coord1Int}')
-        ax.set_ylabel(f'Dimension {coord2Int}')
-        ax.set_title(f'Heatmap {mapInt} Slice (Fixed dims: {fixedInts})')
+        # Add UI elements
+        plt.colorbar(im, ax=ax, label='Heatmap Value')
+        ax.set_xlabel('X ')
+        ax.set_ylabel('Y ')
+        ax.set_title(f'Heatmap Visualization: Map {mapInt}')
 
-        plt.savefig("a_figure.png")
-        plt.close(fig) 
-
+        # Save and cleanup
+        plt.savefig(f"heatmap_visual_{mapInt}.png")
+        plt.close(fig)
 
     def step(self, action):
         new_pos = self.current_pos.copy()

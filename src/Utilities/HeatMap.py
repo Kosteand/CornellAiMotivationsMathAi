@@ -13,49 +13,45 @@ class DistanceTarget():
         self.targetCords = targetCords
         self.lowLeft = lowLeft
         self.topRight = topRight
-        self.dimension = targetCords.size
+        self.dimension = targetCords.shape[-1]
 
     def map(self, cordArr: NDArray[np.int_]) -> np.int_:
-        if not (cordArr.size == self.dimension):
-            raise Exception("Wrong array size")
-        return np.linalg.norm(cordArr - self.targetCords)
+        return np.min(np.linalg.norm(self.targetCords - cordArr, axis=1))
 
     def getRange(self) -> tuple[float, float]:
         corners = np.array(np.meshgrid(*zip(self.lowLeft, self.topRight))).T.reshape(-1, self.dimension)
-        distances = [np.linalg.norm(c - self.targetCords) for c in corners]
-        return (0.0, float(np.max(distances)))
+        max_dists = [np.min(np.linalg.norm(self.targetCords - c, axis=1)) for c in corners]
+        return (0.0, float(np.max(max_dists)))
 
 class ManhattanDistanceTarget():
     def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
         self.targetCords = targetCords
         self.lowLeft = lowLeft
         self.topRight = topRight
-        self.dimension = targetCords.size
+        self.dimension = targetCords.shape[-1]
 
     def map(self, cordArr: NDArray[np.int_]) -> np.int_:
-        if not (cordArr.size == self.dimension):
-            raise Exception("Wrong array size")
-        return np.sum(np.abs(cordArr - self.targetCords))
+        return np.min(np.sum(np.abs(self.targetCords - cordArr), axis=1))
 
     def getRange(self) -> tuple[float, float]:
-        max_dist = np.sum(np.maximum(np.abs(self.topRight - self.targetCords), np.abs(self.lowLeft - self.targetCords)))
-        return (0.0, float(max_dist))
+        corners = np.array(np.meshgrid(*zip(self.lowLeft, self.topRight))).T.reshape(-1, self.dimension)
+        max_dists = [np.min(np.sum(np.abs(self.targetCords - c), axis=1)) for c in corners]
+        return (0.0, float(np.max(max_dists)))
 
 class LInftyDistanceTarget():
     def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
         self.targetCords = targetCords
         self.lowLeft = lowLeft
         self.topRight = topRight
-        self.dimension = targetCords.size
+        self.dimension = targetCords.shape[-1]
 
     def map(self, cordArr: NDArray[np.int_]) -> np.int_:
-        if not (cordArr.size == self.dimension):
-            raise Exception("Wrong array size")
-        return np.amax(np.abs(cordArr - self.targetCords))
+        return np.min(np.amax(np.abs(self.targetCords - cordArr), axis=1))
 
     def getRange(self) -> tuple[float, float]:
-        max_dist = np.amax(np.maximum(np.abs(self.topRight - self.targetCords), np.abs(self.lowLeft - self.targetCords)))
-        return (0.0, float(max_dist))
+        corners = np.array(np.meshgrid(*zip(self.lowLeft, self.topRight))).T.reshape(-1, self.dimension)
+        max_dists = [np.min(np.amax(np.abs(self.targetCords - c), axis=1)) for c in corners]
+        return (0.0, float(np.max(max_dists)))
 
 class DistanceFromMiddle():
     def __init__(self, lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
