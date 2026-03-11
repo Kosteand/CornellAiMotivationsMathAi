@@ -138,5 +138,15 @@ class DirectionWrap():
     def getRange(self)-> tuple[float, float]:
         return self.map.range
     
-    
+class NoiseWrap():
+    def __init__(self,map:HeatMappable,cordArr: NDArray[np.int_]):
+        self.map = map
+        min, max = map.getRange()
+        
+        
+    def map(self, cordArr: NDArray[np.int_]) -> np.int_:
+        return self.map.map(cordArr+self.cordArr)
+        
+    def getRange(self)-> tuple[float, float]:
+        return self.map.range
     

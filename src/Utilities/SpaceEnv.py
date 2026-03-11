@@ -24,7 +24,7 @@ class MazeEnv(gym.Env):
         self.targetAwards = targetAwards
         self.maps = np.array(args)
         self.spawn = spawn
-        self.cords = spawn
+        self.coords = spawn
         if not (self.lowerLeft.shape == (2,) and 
                 self.upperRight.shape == (2,) and 
                 self.spawn.shape == (2,) and 
@@ -44,24 +44,25 @@ class MazeEnv(gym.Env):
             if np.any(coord < self.lowerLeft) or np.any(coord > self.upperRight):
              raise ValueError(f"Target coordinate {coord} is outside the environment boundaries.")
     
-        self.observation_space = spaces.Dict({"positionX": spaces.Discrete(self.num_rows), "positionY": spaces.Discrete(self.num_cols),
-                                               "distU":spaces.Discrete(self.num_rows), "distD":spaces.Discrete(self.num_rows),
+        self.observation_space = spaces.Dict({"distU":spaces.Discrete(self.num_rows), "distD":spaces.Discrete(self.num_rows),
                                                "distR":spaces.Discrete(self.num_cols), "distL":spaces.Discrete(self.num_rows),
                                                "typeU":spaces.Discrete(3), "typeD":spaces.Discrete(3),
                                                "typeR":spaces.Discrete(3), "typeL":spaces.Discrete(3),
-                                               "extras":spaces.Box(low=-np.inf, high=np.inf,shape=(len(args),), dtype=np.float32)
+                                               "extras":spaces.Box(low=-np.inf, high=np.inf,shape=(len(args),), dtype=np.int_)
                                                })
+        
+        
 
 
-        # 0=up, 1=down, 2=left, 3=right 
-        self.action_space = spaces.Discrete(4)  
+        # 0=up, 1=down, 3=left, 2=right 
+        self.action_space = spaces.Dict({"direction":spaces.Discrete(4), "stepSize":spaces.Box(low = 0, high=100, shape=(1,),dtype = np.byte)} ); 
         
 
 
     
     def reset(self):
-        self.current_pos = self.spawn
-        return self.current_pos
+        self.coords = self.spawn
+        return self.coords
     
     
     def visualize(self, mapInt):
@@ -98,79 +99,44 @@ class MazeEnv(gym.Env):
                     aspect='equal', 
                     cmap='viridis')
     
-        # Add UI elements
         plt.colorbar(im, ax=ax, label='Heatmap Value')
         ax.set_xlabel('X ')
         ax.set_ylabel('Y ')
         ax.set_title(f'Heatmap Visualization: Map {mapInt}')
+        ax.scatter(self.coords[0], self.coords[1], 
+           color='red', marker='*', s=200, label='agent', edgecolors='white')
+        
+        
 
         # Save and cleanup
         plt.savefig(f"heatmap_visual_{mapInt}.png")
         plt.close(fig)
 
     def step(self, action):
-        new_pos = self.current_pos.copy()
-    
-        # 1. Determine which dimension to move in
-        # (e.g., if action is 0 or 1, dim is 0; if 2 or 3, dim is 1...)
-        dim = action // 2
-    
-        # 2. Determine direction: Even actions decrease, Odd actions increase
-        # (or vice-versa, depending on your preference)
-        if action % 2 == 0:
-            new_pos[dim] -= 1
+        if action%2 == 0:
+            change = action.stepSize
         else:
-            new_pos[dim] += 1
-        
-        # 3. Add Boundary Checking (Crucial for N-dims)
-        if np.all(new_pos >= self.lowerLeft) and np.all(new_pos <= self.upperRight):
-            self.current_pos = new_pos
-            # Check if the new position is valid TODO
-            if self._is_valid_position(new_pos):
-                self.current_pos = new_pos
-
-            # Reward function TODO
-            if np.array_equal(self.current_pos, self.goal_pos):
-                reward = 1.0
-                done = True
-            else:
-                reward = 0.0
-                done = False
-
-            return self.current_pos, reward, done, {}
+            change = -action.stepSize
+        oldLoc = self.coords
+        if action/2 ==0 :
+            self.coords = self.coords+[0,change]
+        else:
+            self.coords = self.coords+[change,0]
+        if not self._is_valid_position(self, pos):
+            self.coords = oldLoc
+            return -5
+        if (np.any(self.coords == self.targetCords)):
+            self.reset
+            return 100
+        return -1
+            
+            
 
     def _is_valid_position(self, pos):
         row, col = pos
    
         # If agent goes out of the grid
-        if row < 0 or col < 0 or row >= self.num_rows or col >= self.num_cols:
+        if np.any(pos < self.lowerLeft) or np.any(pos > self.upperRight)
             return False
 
         return True
-#TODO 
-    def render(self):
-        # Clear the screen
-        self.screen.fill((255, 255, 255))  
-
-        # Draw env elements one cell at a time
-        for row in range(self.num_rows):
-            for col in range(self.num_cols):
-                cell_left = col * self.cell_size
-                cell_top = row * self.cell_size
-            
-                try:
-                    print(np.array(self.current_pos)==np.array([row,col]).reshape(-1,1))
-                except Exception as e:
-                    print('Initial state')
-
-                if self.maze[row, col] == '#':  # Obstacle
-                    pygame.draw.rect(self.screen, (0, 0, 0), (cell_left, cell_top, self.cell_size, self.cell_size))
-                elif self.maze[row, col] == 'S':  # Starting position
-                    pygame.draw.rect(self.screen, (0, 255, 0), (cell_left, cell_top, self.cell_size, self.cell_size))
-                elif self.maze[row, col] == 'G':  # Goal position
-                    pygame.draw.rect(self.screen, (255, 0, 0), (cell_left, cell_top, self.cell_size, self.cell_size))
-
-                if np.array_equal(np.array(self.current_pos), np.array([row, col]).reshape(-1,1)):  # Agent position
-                    pygame.draw.rect(self.screen, (0, 0, 255), (cell_left, cell_top, self.cell_size, self.cell_size))
-
-        pygame.display.update()  # Update the display
