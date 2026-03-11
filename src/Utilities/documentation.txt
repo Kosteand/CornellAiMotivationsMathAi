@@ -1,0 +1,11 @@
+command usage:
+    init <r : int> <c : int> - intializes Maze with dimension r x c.
+    train                    - begins training.
+    speed  <float>           - sets speed of training. 
+    pause                    - pause training.
+    stop                     - stop training.
+    reset                    - resets the position of the agent.
+    visualize <int>          - creates visualization of Map / HeatMap and writes plot to file named heatmap_visual_<int>.png.
+    step <action : int>      - steps based on action provided.
+    valid <r : int> <c : int> - returns whether maze[r][c] is a valid position. Equivalent to "cat valid <r : int> <c : int>".
+    render                   - renders maze state. Equivalent to cat render
