@@ -29,17 +29,21 @@ class ActoCritic(nn.Module):
         
 
         critic_layers = [
-            nn.Linear(n_features, 32),
+            nn.Linear(n_features, 128),
             nn.ReLU(),
-            nn.Linear(32, 32),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
             nn.ReLU(),
             nn.Linear(32, 1),  # estimate V(s)
         ]
 
         actor_layers = [
-            nn.Linear(n_features, 32),
+            nn.Linear(n_features, 128),
             nn.ReLU(),
-            nn.Linear(32, 32),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
             nn.ReLU(),
             nn.Linear(
                 32, n_actions
@@ -136,8 +140,12 @@ class ActoCritic(nn.Module):
             gae = td_error + gamma * lam * masks[t] * gae
             advantages[t] = gae
 
+        returns = advantages + value_preds
+        critic_loss = (returns.detach() - value_preds).pow(2).mean()
+        
         # calculate the loss of the minibatch for actor and critic
-        critic_loss = advantages.pow(2).mean()
+        #Prevents exploding gradient here
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # give a bonus for higher entropy to encourage exploration
         actor_loss = (
@@ -157,37 +165,50 @@ class ActoCritic(nn.Module):
         """
         self.critic_optim.zero_grad()
         critic_loss.backward()
+        nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=0.5)
+
         self.critic_optim.step()
 
         self.actor_optim.zero_grad()
         actor_loss.backward()
+        nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)
+
         self.actor_optim.step()
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Running RL Training on: {device.upper()}")
 
-# 3. Create Environment with Rendering
+saveWeights = True
+load_weights = False
+
+actor_weights_path = "weights/actor_weights.h5"
+critic_weights_path = "weights/critic_weights.h5"
+
+ # 3. Create Environment with Rendering
 low = np.array([0, 0])
 high = np.array([100, 100])
 
-spawn = np.array([1, 1])
-target_coords = np.array([[20, 8], [80, 30]])
-target_awards = np.array([100, 50])
+spawn = np.array([5, 5])
+target_coords = np.array([[35, 40], [70,20]])
+target_awards = np.array([10, 5])
 
 dummy_heatmap_ManhattanMid = ManhattanDistanceFromMiddle(lowLeft=low, topRight=high)
 
 dummy_Heatmap_Target_Dist = DistanceTarget(lowLeft=low,topRight=high, targetCords=target_coords)
 
 dummy_Heatmap_Target_Dist_Manhat = ManhattanDistanceTarget(lowLeft=low,topRight=high, targetCords=target_coords)
-
+lookU = DirectionWrap(dummy_Heatmap_Target_Dist_Manhat, [0, 1])
+lookD = DirectionWrap(dummy_Heatmap_Target_Dist_Manhat, [0, -1])
+lookR = DirectionWrap(dummy_Heatmap_Target_Dist_Manhat, [1, 0])
+lookL = DirectionWrap(dummy_Heatmap_Target_Dist_Manhat, [-1, 0])
 
 def makeEnv():
     def _init():
         # Create your specific env
         env = MazeEnv(low, high, spawn, target_awards, target_coords, 
-                      dummy_heatmap_ManhattanMid, dummy_Heatmap_Target_Dist, 
-                      dummy_Heatmap_Target_Dist_Manhat)
+                    dummy_heatmap_ManhattanMid, dummy_Heatmap_Target_Dist, 
+                    dummy_Heatmap_Target_Dist_Manhat, lookU, lookD, lookR, lookL)
         # Apply the same wrappers
         env = FlattenObservation(env)
         return env
@@ -197,162 +218,206 @@ nEnvs = 4
 
 env = gym.vector.SyncVectorEnv([makeEnv() for _ in range(nEnvs)])
 
-
-
 obsShape = env.single_observation_space.shape[0]
 actionShape = env.single_action_space.n
 
 #Defining core constants
-criticLr = 0.001
-actorLr = 0.003
-nUpdates = 1000
+criticLr = 0.0001
+actorLr = 0.0003
+nUpdates = 3000
 nStepsPerUpdate = 64
 
 gamma = 0.99
 lam = 0.95
-entropyBonus = 0.01
+beginEntropy = 0.15
+endEntropy = 0.05
+entropyBonus = beginEntropy
+
+if saveWeights:
 
 
-agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, nEnvs)
 
-# Vector-specific wrapper
-envWrapper = gym.wrappers.vector.RecordEpisodeStatistics(env)
-criticLosses = []
-actorLosses = []
-entropies = []
 
-for samplePhase in tqdm(range(nUpdates)):
-    epValuePreds = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
-    epRewards = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
-    epActionLogProbs = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
-    masks = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
 
-    if(samplePhase==0):
-        states,__ = envWrapper.reset()
 
-    for step in range(nStepsPerUpdate):
-        actions, actionLogProbs, stateValuePreds, entropy = agent.select_action(
-        states)
+
+    agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, nEnvs)
+
+    # Vector-specific wrapper
+    envWrapper = gym.wrappers.vector.RecordEpisodeStatistics(env)
+    criticLosses = []
+    actorLosses = []
+    entropies = []
+    current_max_steps = 1000
+    min_steps = 250
+    step_decay = 15
+    
+    for samplePhase in tqdm(range(nUpdates)):
+        entropyBonus = max(0.05,beginEntropy - (samplePhase*2 / nUpdates) * (beginEntropy - endEntropy))
+        if samplePhase % 100 == 0 and current_max_steps > min_steps:
+            current_max_steps -= step_decay
+            # New step val in all 4 envs
+            env.set_attr("max_steps", current_max_steps)
+            print(f"Tightening the clock! New Max Steps: {current_max_steps}")
         
-        states, rewards, terminated, truncated, infos = envWrapper.step(
-        actions.cpu().numpy())
-        
-        
-        epValuePreds[step] = torch.squeeze(stateValuePreds)
-        epRewards[step] = torch.tensor(rewards, device=device)
-        epActionLogProbs[step] = actionLogProbs
-        
-        masks[step] = torch.tensor([not term for term in terminated])
+        epValuePreds = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
+        epRewards = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
+        epActionLogProbs = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
+        masks = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
 
-        # calculate the losses for actor and critic
-    critic_loss, actor_loss = agent.get_losses(
-        epRewards,
-        epActionLogProbs,
-        epValuePreds,
-        entropy,
-        masks,
-        gamma,
-        lam,
-        entropyBonus,
-        device,
+        if(samplePhase==0):
+            states,__ = envWrapper.reset()
+            
+        epEntropies = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
+        
+        
+        for step in range(nStepsPerUpdate):
+            actions, actionLogProbs, stateValuePreds, entropy = agent.select_action(
+            states)
+            epEntropies[step] = entropy
+            states, rewards, terminated, truncated, infos = envWrapper.step(
+            actions.cpu().numpy())
+            
+            
+            epValuePreds[step] = torch.squeeze(stateValuePreds)
+            epRewards[step] = torch.tensor(rewards, device=device)
+            epActionLogProbs[step] = actionLogProbs
+            
+            masks[step] = torch.tensor([not term for term in terminated])
+
+            # calculate the losses for actor and critic
+        critic_loss, actor_loss = agent.get_losses(
+            epRewards,
+            epActionLogProbs,
+            epValuePreds,
+            epEntropies,
+            masks,
+            gamma,
+            lam,
+            entropyBonus,
+            device,
+        )
+
+        # update the actor and critic networks
+        agent.update_parameters(critic_loss, actor_loss)
+
+        # log the losses and entropy
+        criticLosses.append(critic_loss.detach().cpu().numpy())
+        actorLosses.append(actor_loss.detach().cpu().numpy())
+        entropies.append(entropy.detach().mean().cpu().numpy())
+
+
+
+    """ plot the results """
+
+    # %matplotlib inline
+
+    rolling_length = 20
+    fig, axs = plt.subplots(nrows=2, ncols=2, figsize=(12, 5))
+    fig.suptitle(
+        f"Training plots for {agent.__class__.__name__} in the LunarLander-v3 environment \n \
+                (n_envs={nEnvs}, n_steps_per_update={nStepsPerUpdate})"
     )
 
-    # update the actor and critic networks
-    agent.update_parameters(critic_loss, actor_loss)
-
-    # log the losses and entropy
-    criticLosses.append(critic_loss.detach().cpu().numpy())
-    actorLosses.append(actor_loss.detach().cpu().numpy())
-    entropies.append(entropy.detach().mean().cpu().numpy())
-
-
-
-""" plot the results """
-
-# %matplotlib inline
-
-rolling_length = 20
-fig, axs = plt.subplots(nrows=2, ncols=2, figsize=(12, 5))
-fig.suptitle(
-    f"Training plots for {agent.__class__.__name__} in the LunarLander-v3 environment \n \
-             (n_envs={nEnvs}, n_steps_per_update={nStepsPerUpdate})"
-)
-
-# episode return
-axs[0][0].set_title("Episode Returns")
-episode_returns_moving_average = (
-    np.convolve(
-        np.array(envWrapper.return_queue).flatten(),
-        np.ones(rolling_length),
-        mode="valid",
+    # episode return
+    axs[0][0].set_title("Episode Returns")
+    episode_returns_moving_average = (
+        np.convolve(
+            np.array(envWrapper.return_queue).flatten(),
+            np.ones(rolling_length),
+            mode="valid",
+        )
+        / rolling_length
     )
-    / rolling_length
-)
-axs[0][0].plot(
-    np.arange(len(episode_returns_moving_average)) / nEnvs,
-    episode_returns_moving_average,
-)
-axs[0][0].set_xlabel("Number of episodes")
-
-# entropy
-axs[1][0].set_title("Entropy")
-entropy_moving_average = (
-    np.convolve(np.array(entropies), np.ones(rolling_length), mode="valid")
-    / rolling_length
-)
-axs[1][0].plot(entropy_moving_average)
-axs[1][0].set_xlabel("Number of updates")
-
-
-# critic loss
-axs[0][1].set_title("Critic Loss")
-critic_losses_moving_average = (
-    np.convolve(
-        np.array(criticLosses).flatten(), np.ones(rolling_length), mode="valid"
+    axs[0][0].plot(
+        np.arange(len(episode_returns_moving_average)) / nEnvs,
+        episode_returns_moving_average,
     )
-    / rolling_length
-)
-axs[0][1].plot(critic_losses_moving_average)
-axs[0][1].set_xlabel("Number of updates")
+    axs[0][0].set_xlabel("Number of episodes")
+
+    # entropy
+    axs[1][0].set_title("Entropy")
+    entropy_moving_average = (
+        np.convolve(np.array(entropies), np.ones(rolling_length), mode="valid")
+        / rolling_length
+    )
+    axs[1][0].plot(entropy_moving_average)
+    axs[1][0].set_xlabel("Number of updates")
 
 
-# actor loss
-axs[1][1].set_title("Actor Loss")
-actor_losses_moving_average = (
-    np.convolve(np.array(actorLosses).flatten(), np.ones(rolling_length), mode="valid")
-    / rolling_length
-)
-axs[1][1].plot(actor_losses_moving_average)
-axs[1][1].set_xlabel("Number of updates")
-
-plt.tight_layout()
-plt.show()
-plt.savefig("result1")
+    # critic loss
+    axs[0][1].set_title("Critic Loss")
+    critic_losses_moving_average = (
+        np.convolve(
+            np.array(criticLosses).flatten(), np.ones(rolling_length), mode="valid"
+        )
+        / rolling_length
+    )
+    axs[0][1].plot(critic_losses_moving_average)
+    axs[0][1].set_xlabel("Number of updates")
 
 
+    # actor loss
+    axs[1][1].set_title("Actor Loss")
+    actor_losses_moving_average = (
+        np.convolve(np.array(actorLosses).flatten(), np.ones(rolling_length), mode="valid")
+        / rolling_length
+    )
+    axs[1][1].plot(actor_losses_moving_average)
+    axs[1][1].set_xlabel("Number of updates")
 
-save_weights = True
-load_weights = False
+    plt.tight_layout()
+    plt.show()
+    plt.savefig("result1")
 
-actor_weights_path = "weights/actor_weights.h5"
-critic_weights_path = "weights/critic_weights.h5"
 
-if not os.path.exists("weights"):
-    os.mkdir("weights")
 
-""" save network weights """
-if save_weights:
+
+    if not os.path.exists("weights"):
+        os.mkdir("weights")
+
+    """ save network weights """
     torch.save(agent.actor.state_dict(), actor_weights_path)
     torch.save(agent.critic.state_dict(), critic_weights_path)
 
 
 """ load network weights """
 if load_weights:
-    agent = A2C(obs_shape, action_shape, device, critic_lr, actor_lr)
+    agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, n_envs=1)
 
     agent.actor.load_state_dict(torch.load(actor_weights_path))
     agent.critic.load_state_dict(torch.load(critic_weights_path))
     agent.actor.eval()
     agent.critic.eval()
+agent.critic.eval()
+agent.actor.eval()
+
+evalEnv = MazeEnv(low, high, spawn, target_awards, target_coords, 
+                   dummy_heatmap_ManhattanMid, dummy_Heatmap_Target_Dist, 
+                   dummy_Heatmap_Target_Dist_Manhat,lookU, lookD, lookR, lookL)
+evalEnv = FlattenObservation(evalEnv)
+
+obs, info = evalEnv.reset()
+done = False
+totalReward = 0
+
+with torch.no_grad(): # No training pytorch stuff
+    while not done:
+        # 1. Get the action (add a batch dimension with [None, :] for the network)
+        _, actionLogits = agent.forward(obs[None, :])
+        
+        # 2. Pick the BEST action (Argmax)
+        actions, _, _, _ = agent.select_action(obs[None, :])
+        action = actions.item()
+        
+        # 3. Step the environment
+        obs, reward, terminated, truncated, info = evalEnv.step(action)
+        evalEnv.unwrapped.visualize(1)
+        print(evalEnv.unwrapped.coords)
+        totalReward += reward
+        done = terminated or truncated
+
+print(f"Final Score: {totalReward}")
+evalEnv.close()
 
 env.close()

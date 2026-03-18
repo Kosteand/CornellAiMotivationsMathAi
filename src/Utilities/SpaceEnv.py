@@ -19,6 +19,8 @@ class MazeEnv(gym.Env):
                  spawn: npt.NDArray[np.int_],targetAwards: npt.NDArray[np.int_],
                  targetCords : npt.NDArray[np.int_], *args: HeatMappable):
         super(MazeEnv, self).__init__()
+        self.max_steps = 1000  # Default starting limit
+        self.current_step = 0
         self.lowerLeft = np.array(lowerLeft)
         self.upperRight = np.array(upperRight)
         self.targetCords = np.array(targetCords)
@@ -44,9 +46,10 @@ class MazeEnv(gym.Env):
         for coord in self.targetCords:
             if np.any(coord < self.lowerLeft) or np.any(coord > self.upperRight):
              raise ValueError(f"Target coordinate {coord} is outside the environment boundaries.")
-    
-        self.observation_space = spaces.Dict({"distU":spaces.Discrete(self.num_rows), "distD":spaces.Discrete(self.num_rows),
-                                               "distR":spaces.Discrete(self.num_cols), "distL":spaces.Discrete(self.num_rows),
+    #Size of distance obervation space is now fixed because of issues with using same weights for diff map sizes
+    #TODO fix to a maxDim-shouldl be easy
+        self.observation_space = spaces.Dict({"distU":spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32), "distD":spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
+                                               "distR":spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32), "distL":spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
                                                "typeU":spaces.Discrete(3), "typeD":spaces.Discrete(3),
                                                "typeR":spaces.Discrete(3), "typeL":spaces.Discrete(3),
                                                "extras":spaces.Box(low=-np.inf, high=np.inf,shape=(len(args),), dtype=np.float32)
@@ -61,23 +64,59 @@ class MazeEnv(gym.Env):
 
 
     
-    def reset(self, seed=None, options=None):
+    def reset(self, seed=None, options=None, randomSpawn=False, randomSize=False, randomTargetCoords=False):
         # Gymnasium reset must handle seeds and return (obs, info)
         super().reset(seed=seed)
-        self.coords = self.spawn.copy()
+        self.current_step = 0
+        if(randomSize):
+            random_x = self.np_random.integers(-20, 20)
+            random_y = self.np_random.integers(-20, 20)
         
+            random_x_size = self.np_random.integers(10, 120)
+            random_y_size = self.np_random.integers(10,120)
+            
+            self.lowerLeft[0] = random_x
+            self.lowerLeft[1] = random_y
+            self.upperRight = self.lowerLeft+[random_x_size,random_y_size]
+            self.num_cols = self.upperRight[0] - self.lowerLeft[0] + 1
+            self.num_rows = self.upperRight[1] - self.lowerLeft[1] + 1
+        
+        if(randomSpawn):
+            random_x = self.np_random.integers(self.lowerLeft[0], self.upperRight[0])
+            random_y = self.np_random.integers(self.lowerLeft[1], self.upperRight[1])
+        
+            self.coords = np.array([random_x, random_y])
+        else:
+            self.coords = self.spawn.copy()
+            
+        if (randomTargetCoords):
+            # Create a new array for the targets to avoid modifying the original list
+            new_targets = []
+            for _ in range(len(self.targetCords)):
+                # Generate random X and Y within the current world bounds
+                tx = self.np_random.integers(self.lowerLeft[0], self.upperRight[0] + 1)
+                ty = self.np_random.integers(self.lowerLeft[1], self.upperRight[1] + 1)
+                new_targets.append([tx, ty])
+            
+            self.targetCords = np.array(new_targets)
+        # Simple way to ensure spawn isn't a target
+        while any(np.array_equal(self.coords, t) for t in self.targetCords):
+            self.coords = self.np_random.integers(self.lowerLeft, self.upperRight + 1, size=2)
         observation = self.getObs()
         info = {}
+        self.visualize(1)
+        print(self.num_cols)
+        print(self.num_rows)
+
         return observation, info
     
     def getObs(self):
+        distU = float(self.upperRight[1] - self.coords[1]) / self.num_rows
+        distD = float(self.coords[1] - self.lowerLeft[1]) / self.num_rows
+        distR = float(self.upperRight[0] - self.coords[0]) / self.num_cols
+        distL = float(self.coords[0] - self.lowerLeft[0]) / self.num_cols
         
-        obs = {"distU": int(self.upperRight[1] - self.coords[1]),
-            "distD": int(self.coords[1] - self.lowerLeft[1]),
-            "distR": int(self.upperRight[0] - self.coords[0]),
-            "distL": int(self.coords[0] - self.lowerLeft[0]),
-            "typeU": 0, "typeD": 0, "typeR": 0, "typeL": 0, # Placeholders for logic
-            "extras": np.array([m.map(self.coords) for m in self.maps], dtype=np.float32)}
+        typeU, typeD, typeR, typeL = 0, 0, 0, 0
         
         for target in self.targetCords:
             tx, ty = target
@@ -85,27 +124,35 @@ class MazeEnv(gym.Env):
 
             # Check Vertical Axis (Up/Down)
             if tx == ax:
-                dist = int(abs(ty - ay))
+                dist = int(abs(ty - ay))/self.num_rows
                 if ty > ay: # Target is Above
-                    if dist < obs["distU"]:
-                        obs["distU"] = dist
-                        obs["typeU"] = 1
+                    if dist< distU:
+                        distU = dist
+                        typeU = 1
                 elif ty < ay: # Target is Below
-                    if dist < obs["distD"]:
-                        obs["distD"] = dist
-                        obs["typeD"] = 1
+                    if dist< distD:
+                        distD = dist
+                        typeD= 1
 
             # Check Horizontal Axis (Right/Left)
             if ty == ay:
-                dist = int(abs(tx - ax))
+                dist = int(abs(tx - ax))/self.num_cols
                 if tx > ax: # Target is to the Right
-                    if dist < obs["distR"]:
-                        obs["distR"] = dist
-                        obs["typeR"] = 1
+                    if dist <distR:
+                        distR =dist
+                        typeR = 1
                 elif tx < ax: # Target is to the Left
-                    if dist < obs["distL"]:
-                        obs["distL"] = dist
-                        obs["typeL"] = 1
+                    if dist <distL:
+                        distL = dist
+                        typeL = 1
+                        
+        obs = {
+        "distU": np.array([distU], dtype=np.float32),"distD": np.array([distD], dtype=np.float32),
+        "distR": np.array([distR], dtype=np.float32),"distL": np.array([distL], dtype=np.float32),
+        "typeU": typeU,"typeD": typeD,
+        "typeR": typeR,"typeL": typeL,
+        "extras": np.array([m.map(self.coords) for m in self.maps], dtype=np.float32)
+        }
 
         return obs
     
@@ -154,11 +201,21 @@ class MazeEnv(gym.Env):
         
 
         # Save and cleanup
-        plt.savefig(f"heatmap_visual_{mapInt}{datetime.now()}.png")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        plt.savefig(f"./visualize/heatmap__{mapInt}_{timestamp}.png")        
         plt.close(fig)
 
     def step(self, action):
+        self.current_step += 1
+        truncated = False
         terminated = False
+        
+        if self.current_step >= self.max_steps:
+            truncated = True
+            reward = -10
+            return self.getObs(), reward, terminated, truncated, {}
+            
+            
         direction = action
         stepSize = 1
         if direction%2 == 0:
@@ -177,6 +234,7 @@ class MazeEnv(gym.Env):
         hits = np.all(matches, axis=1)
 
         if np.any(hits):
+            print("Target hit")
             # Get the index of the first target hit
             target_idx = np.where(hits)[0][0]
             reward = self.targetAwards[target_idx]
@@ -185,9 +243,9 @@ class MazeEnv(gym.Env):
             # Check if we hit a wall (already calculated) or just a normal step
             if not self._is_valid_position(self.coords):
                 self.coords = oldLoc
-                reward = -5
+                reward = -0.1
             else:
-                reward = -1
+                reward = -0.01
                 
         truncated  = False
         return self.getObs(), reward, terminated, truncated, {}
