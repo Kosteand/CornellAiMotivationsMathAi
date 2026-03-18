@@ -8,11 +8,11 @@ numpy>=1.24.0
 pyvirtualdisplay>=3.0
 Pillow>=10.0.0
 moviepy>=1.0.3
-pygame>=
+tqdm
 
 # Utilities
 matplotlib
 tqdm
 openpyxl
 pandas
-cv2
+opencv-python-headless

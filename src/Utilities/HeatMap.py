@@ -137,16 +137,29 @@ class DirectionWrap():
         
     def getRange(self)-> tuple[float, float]:
         return self.map.range
-    
-class NoiseWrap():
-    def __init__(self,map:HeatMappable,cordArr: NDArray[np.int_]):
-        self.map = map
-        min, max = map.getRange()
+class NoiseWrap:
+    def __init__(self, targetMap: HeatMappable, noiseLevel: float = 0.05):
+        """
+        target_map: The original HeatMap object.
+        noise_level: The standard deviation of the Gaussian noise to add.
+        """
+        self.target_map = targetMap
+        self.noise_level = noiseLevel
         
+    def map(self, cordArr: NDArray[np.int_]) -> float:
+        # 1. Get the "clean" value from the original map
+        clean_value = self.target_map.map(cordArr)
         
-    def map(self, cordArr: NDArray[np.int_]) -> np.int_:
-        return self.map.map(cordArr+self.cordArr)
+        # 2. Calculate the range to scale noise appropriately
+        low, high = self.getRange()
+        scale = (high - low) * self.noise_level
         
-    def getRange(self)-> tuple[float, float]:
-        return self.map.range
+        # 3. Add Gaussian (Normal) noise
+        noise = np.random.normal(0, scale)
+        
+        return clean_value + noise
+        
+    def getRange(self) -> tuple[float, float]:
+        # Return the range of the underlying map
+        return self.target_map.getRange()
     

@@ -5,6 +5,7 @@ from openpyxl import Workbook
 from Utilities.HeatMap import HeatMappable
 import matplotlib.pyplot as plt
 import numpy.typing as npt
+from datetime import datetime
 
 
 class MazeEnv(gym.Env):
@@ -55,7 +56,7 @@ class MazeEnv(gym.Env):
 
 
         # 0=up, 1=down, 3=left, 2=right 
-        self.action_space = spaces.Dict({"direction":spaces.Discrete(4), "stepSize":spaces.Box(low = 0, high=100, shape=(1,),dtype = np.int32)} ); 
+        self.action_space = spaces.Discrete(4); 
         
 
 
@@ -65,7 +66,7 @@ class MazeEnv(gym.Env):
         super().reset(seed=seed)
         self.coords = self.spawn.copy()
         
-        observation = self._get_obs()
+        observation = self.getObs()
         info = {}
         return observation, info
     
@@ -153,16 +154,17 @@ class MazeEnv(gym.Env):
         
 
         # Save and cleanup
-        plt.savefig(f"heatmap_visual_{mapInt}.png")
+        plt.savefig(f"heatmap_visual_{mapInt}{datetime.now()}.png")
         plt.close(fig)
 
     def step(self, action):
-        direction = action["direction"]
-        step_size = int(action["stepSize"][0])
+        terminated = False
+        direction = action
+        stepSize = 1
         if direction%2 == 0:
-            change = step_size
+            change = stepSize
         else:
-            change = -step_size
+            change = -stepSize
         oldLoc = self.coords.copy()
         if direction//2 ==0 :
             self.coords = self.coords+[0,change]
