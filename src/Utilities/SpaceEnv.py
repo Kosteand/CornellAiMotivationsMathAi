@@ -203,7 +203,7 @@ class MazeEnv(gym.Env):
         ax.scatter(self.coords[0], self.coords[1], 
            color='red', marker='*', s=200, label='agent', edgecolors='white')
         
-        # !!!!! Ekadh add visualization heres
+        # !!!!! Ekadh add visualization here
 
         # Save and cleanup
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
