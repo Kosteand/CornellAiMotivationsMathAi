@@ -17,7 +17,8 @@ class MazeEnv(gym.Env):
     #*args: List of heatMaps (probably from HeatMap.py)
     def __init__(self,lowerLeft: npt.NDArray[np.int_], upperRight: npt.NDArray[np.int_], 
                  spawn: npt.NDArray[np.int_],targetAwards: npt.NDArray[np.int_],
-                 targetCords : npt.NDArray[np.int_], *args: HeatMappable):
+                 targetCords : npt.NDArray[np.int_], *args: HeatMappable,
+                 walls: np.ndarray | None = None):
         super(MazeEnv, self).__init__()
         self.max_steps = 1000  # Default starting limit
         self.current_step = 0
@@ -46,6 +47,21 @@ class MazeEnv(gym.Env):
         for coord in self.targetCords:
             if np.any(coord < self.lowerLeft) or np.any(coord > self.upperRight):
              raise ValueError(f"Target coordinate {coord} is outside the environment boundaries.")
+            
+
+        if walls is not None:
+          if walls.shape != (self.num_cols, self.num_rows):
+              raise ValueError(f"Walls array must have shape ({self.num_cols}, {self.num_rows})")
+          # Indexing convention: walls[x - lowerLeft[0], y - lowerLeft[1]]
+          if walls[self.spawn[0] - self.lowerLeft[0], self.spawn[1] - self.lowerLeft[1]]:
+              raise ValueError("Spawn point cannot be on a wall")
+          for coord in self.targetCords:
+              if walls[coord[0] - self.lowerLeft[0], coord[1] - self.lowerLeft[1]]:
+                  raise ValueError(f"Target {coord} cannot be on a wall")
+          self.walls = walls
+        else:
+          self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
+    
     #Size of distance obervation space is now fixed because of issues with using same weights for diff map sizes
     #TODO fix to a maxDim-shouldl be easy
         self.observation_space = spaces.Dict({"distU":spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32), "distD":spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
@@ -130,51 +146,40 @@ class MazeEnv(gym.Env):
 
         return observation, info
     
+    def _scan_direction(self, dx, dy):
+        """Returns (distance, type) where type: 0=boundary/wall, 1=target"""
+        x, y = self.coords
+        dist = 0
+        while True:
+            x += dx
+            y += dy
+            dist += 1
+            if np.any([x, y] < self.lowerLeft) or np.any([x, y] > self.upperRight):
+                return dist - 1, 0  # hit boundary
+            xi = x - self.lowerLeft[0]
+            yi = y - self.lowerLeft[1]
+            if self.walls[xi, yi]:
+                return dist, 0      # hit wall
+            if any(np.array_equal([x, y], t) for t in self.targetCords):
+                return dist, 1      # hit target
+    
     def getObs(self):
         distU = float(self.upperRight[1] - self.coords[1]) / self.num_rows
         distD = float(self.coords[1] - self.lowerLeft[1]) / self.num_rows
         distR = float(self.upperRight[0] - self.coords[0]) / self.num_cols
         distL = float(self.coords[0] - self.lowerLeft[0]) / self.num_cols
         
-        typeU, typeD, typeR, typeL = 0, 0, 0, 0
+        distU, typeU = self._scan_direction(0, 1)
+        distD, typeD = self._scan_direction(0, -1)
+        distR, typeR = self._scan_direction(1, 0)
+        distL, typeL = self._scan_direction(-1, 0)
         
-        for target in self.targetCords:
-            tx, ty = target
-            ax, ay = self.coords
-
-            # Check Vertical Axis (Up/Down)
-            if tx == ax:
-                dist = int(abs(ty - ay))/self.num_rows
-                if ty > ay: # Target is Above
-                    if dist< distU:
-                        distU = dist
-                        typeU = 1
-                elif ty < ay: # Target is Below
-                    if dist< distD:
-                        distD = dist
-                        typeD= 1
-
-            # Check Horizontal Axis (Right/Left)
-            if ty == ay:
-                dist = int(abs(tx - ax))/self.num_cols
-                if tx > ax: # Target is to the Right
-                    if dist <distR:
-                        distR =dist
-                        typeR = 1
-                elif tx < ax: # Target is to the Left
-                    if dist <distL:
-                        distL = dist
-                        typeL = 1
-                        
-        obs = {
-        "distU": np.array([distU], dtype=np.float32),"distD": np.array([distD], dtype=np.float32),
-        "distR": np.array([distR], dtype=np.float32),"distL": np.array([distL], dtype=np.float32),
-        "typeU": typeU,"typeD": typeD,
-        "typeR": typeR,"typeL": typeL,
-        "extras": np.array([m.map(self.coords) for m in self.maps], dtype=np.float32)
+        return {
+            "distU": np.array([distU / self.num_rows], dtype=np.float32), "distD": np.array([distD / self.num_rows], dtype=np.float32),
+            "distR": np.array([distR / self.num_cols], dtype=np.float32), "distL": np.array([distL / self.num_cols], dtype=np.float32),
+            "typeU": typeU, "typeD": typeD, "typeR": typeR, "typeL": typeL,
+            "extras": np.array([m.map(self.coords) for m in self.maps], dtype=np.float32)
         }
-
-        return obs
     
     
     def visualize(self, mapInt):
@@ -218,7 +223,7 @@ class MazeEnv(gym.Env):
         ax.scatter(self.coords[0], self.coords[1], 
            color='red', marker='*', s=200, label='agent', edgecolors='white')
         
-        
+        # !!!!! Ekadh add visualization heres
 
         # Save and cleanup
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -278,5 +283,9 @@ class MazeEnv(gym.Env):
         # If agent goes out of the grid
         if np.any(pos < self.lowerLeft) or np.any(pos > self.upperRight):
             return False
-
+        #check if the agent is going into a wall
+        x_idx = pos[0] - self.lowerLeft[0]
+        y_idx = pos[1] - self.lowerLeft[1]
+        if self.walls[x_idx, y_idx]:
+          return False
         return True
