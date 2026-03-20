@@ -2,6 +2,7 @@ import numpy as np
 import random
 from numpy.typing import NDArray
 from typing import Protocol
+import numpy.typing as npt
 
 
 
@@ -224,18 +225,24 @@ class LInftyDistanceFromMiddle():
         return generate_heatmap_impl(self, noise, blockSize)
     
 class DirectionWrap():
-    def __init__(self,map:HeatMappable,cordArr: NDArray[np.int_]):
-        self.map = map
-        self.cordArr = cordArr
+    def __init__(self, heatmap: HeatMappable, offset: npt.NDArray[np.int_]):
+        """
+        heatmap: The original HeatMappable object (e.g., DistanceTarget)
+        offset: A 2D vector like [0, 1] for Up, [0, -1] for Down, etc.
+        """
+        self.heatmap = heatmap
+        self.offset = np.array(offset)
         
+    def map(self, current_coords: npt.NDArray[np.int_]) -> np.float32:
+        """
+        Returns the heatmap value at the agent's position + the offset.
+        Essentially 'looking' one step in a specific direction.
+        """
+        look_ahead_point = current_coords + self.offset
+        return self.heatmap.map(look_ahead_point)
         
-    def map(self, cordArr: NDArray[np.int_]) -> np.int_:
-        return self.map.map(cordArr+self.cordArr)
-        
-    def getRange(self)-> tuple[float, float]:
-        return self.map.range
-
-
+    def getRange(self) -> tuple[float, float]:
+        return self.heatmap.range
 class NoiseWrap:
     def __init__(self, targetMap: HeatMappable, noiseLevel: float = 0.05):
         """
