@@ -107,6 +107,26 @@ class MazeEnv(gym.Env):
         self.visualize(1)
         print(self.num_cols)
         print(self.num_rows)
+        #TODO
+        self.maps = []
+    for h_class in self.heatmap_configs:
+        # Logic to check what arguments the class needs
+        if h_class in [DistanceTarget, ManhattanDistanceTarget, LInftyDistanceTarget]:
+            # These need targets + bounds
+            new_map = h_class(targetCords=self.targetCords, 
+                              lowLeft=self.lowerLeft, 
+                              topRight=self.upperRight)
+        else:
+            # These only need bounds (like DistanceFromMiddle)
+            new_map = h_class(lowLeft=self.lowerLeft, 
+                              topRight=self.upperRight)
+        
+        # Optional: Wrap with Noise or Directions if desired
+        # new_map = NoiseWrap(new_map, noiseLevel=0.05)
+        
+        self.maps.append(new_map)
+
+    # 4. Handle Spawn and Observation
 
         return observation, info
     
