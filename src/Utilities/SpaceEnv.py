@@ -1,8 +1,10 @@
+import inspect
+
 import gymnasium as gym
 import numpy as np 
 from gymnasium import spaces
 from openpyxl import Workbook 
-from Utilities.HeatMap import HeatMappable
+from Utilities.HeatMap import DistanceTarget, HeatMappable, LInftyDistanceTarget, ManhattanDistanceTarget
 import matplotlib.pyplot as plt
 import numpy.typing as npt
 from datetime import datetime
@@ -17,20 +19,22 @@ class MazeEnv(gym.Env):
     #*args: List of heatMaps (probably from HeatMap.py)
     def __init__(self,lowerLeft: npt.NDArray[np.int_], upperRight: npt.NDArray[np.int_], 
                  spawn: npt.NDArray[np.int_],targetAwards: npt.NDArray[np.int_],
-                 targetCords : npt.NDArray[np.int_], *args: HeatMappable,
+                 targetCords : npt.NDArray[np.int_], heatMapTypes:list,
                  walls: np.ndarray | None = None):
         super(MazeEnv, self).__init__()
+        self.heatMapTypes = heatMapTypes
         self.max_steps = 1000  # Default starting limit
         self.current_step = 0
         self.lowerLeft = np.array(lowerLeft)
         self.upperRight = np.array(upperRight)
         self.targetCords = np.array(targetCords)
         self.targetAwards = np.array(targetAwards)
-        self.maps = list(args)
         self.spawn = np.array(spawn)
         self.coords = self.spawn.copy()
         self.num_cols = self.upperRight[0] - self.lowerLeft[0] + 1
         self.num_rows = self.upperRight[1] - self.lowerLeft[1] + 1
+        self.maps = self.buildMaps()
+
         if not (self.lowerLeft.shape == (2,) and 
                 self.upperRight.shape == (2,) and 
                 self.spawn.shape == (2,) and 
@@ -61,6 +65,10 @@ class MazeEnv(gym.Env):
           self.walls = walls
         else:
           self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
+          
+          
+          
+        
     
     #Size of distance obervation space is now fixed because of issues with using same weights for diff map sizes
     #TODO fix to a maxDim-shouldl be easy
@@ -68,7 +76,7 @@ class MazeEnv(gym.Env):
                                                "distR":spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32), "distL":spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
                                                "typeU":spaces.Discrete(3), "typeD":spaces.Discrete(3),
                                                "typeR":spaces.Discrete(3), "typeL":spaces.Discrete(3),
-                                               "extras":spaces.Box(low=-np.inf, high=np.inf,shape=(len(args),), dtype=np.float32)
+                                               "extras":spaces.Box(low=-np.inf, high=np.inf,shape=(len(heatMapTypes),), dtype=np.float32)
                                                })
         
         
@@ -79,9 +87,37 @@ class MazeEnv(gym.Env):
         
 
 
+    def buildMaps(self):
+        env_context = {
+            'lowLeft': self.lowerLeft,
+            'topRight': self.upperRight,
+            'targetCords': self.targetCords,
+            'spawn': self.spawn,
+            'targetAwards':self.targetAwards
+        }
+        
+
+        
+        
+        maps = []
+        for mapType in self.heatMapTypes:
+            if isinstance(mapType, type):
+                innitSignature = inspect.signature(mapType.__init__)
+            else:
+                innitSignature = inspect.signature(mapType)
+            kwargs = {k: v for k, v in env_context.items() if k in innitSignature.parameters.keys()}
+            if any(p.kind == p.VAR_KEYWORD for p in innitSignature.parameters.values()):
+                maps.append(mapType(**env_context))
+            else:
+                maps.append(mapType(**kwargs))
+        return maps 
     
-    def reset(self, seed=None, options=None, randomSpawn=False, randomSize=False, randomTargetCoords=False):
+    def reset(self, seed=None, options=None):
         # Gymnasium reset must handle seeds and return (obs, info)
+        opts = options if options is not None else {}
+        randomSize = opts.get("randomSize", False)
+        randomSpawn = opts.get("randomSpawn", False)
+        randomTargetCoords = opts.get("randomTargetCoords", False)
         super().reset(seed=seed)
         self.current_step = 0
         if(randomSize):
@@ -96,11 +132,11 @@ class MazeEnv(gym.Env):
             self.upperRight = self.lowerLeft+[random_x_size,random_y_size]
             self.num_cols = self.upperRight[0] - self.lowerLeft[0] + 1
             self.num_rows = self.upperRight[1] - self.lowerLeft[1] + 1
+            self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
         
-        if(randomSpawn):
+        if(randomSpawn or randomSize):
             random_x = self.np_random.integers(self.lowerLeft[0], self.upperRight[0])
             random_y = self.np_random.integers(self.lowerLeft[1], self.upperRight[1])
-        
             self.coords = np.array([random_x, random_y])
         else:
             self.coords = self.spawn.copy()
@@ -113,36 +149,17 @@ class MazeEnv(gym.Env):
                 tx = self.np_random.integers(self.lowerLeft[0], self.upperRight[0] + 1)
                 ty = self.np_random.integers(self.lowerLeft[1], self.upperRight[1] + 1)
                 new_targets.append([tx, ty])
-            
             self.targetCords = np.array(new_targets)
         # Simple way to ensure spawn isn't a target
         while any(np.array_equal(self.coords, t) for t in self.targetCords):
             self.coords = self.np_random.integers(self.lowerLeft, self.upperRight + 1, size=2)
+        self.maps = self.buildMaps()
         observation = self.getObs()
         info = {}
-        self.visualize(1)
         print(self.num_cols)
         print(self.num_rows)
         #TODO
-        self.maps = []
-    for h_class in self.heatmap_configs:
-        # Logic to check what arguments the class needs
-        if h_class in [DistanceTarget, ManhattanDistanceTarget, LInftyDistanceTarget]:
-            # These need targets + bounds
-            new_map = h_class(targetCords=self.targetCords, 
-                              lowLeft=self.lowerLeft, 
-                              topRight=self.upperRight)
-        else:
-            # These only need bounds (like DistanceFromMiddle)
-            new_map = h_class(lowLeft=self.lowerLeft, 
-                              topRight=self.upperRight)
-        
-        # Optional: Wrap with Noise or Directions if desired
-        # new_map = NoiseWrap(new_map, noiseLevel=0.05)
-        
-        self.maps.append(new_map)
 
-    # 4. Handle Spawn and Observation
 
         return observation, info
     
@@ -200,7 +217,7 @@ class MazeEnv(gym.Env):
             for idx_x, val_x in enumerate(x_range):
                 # Create the 2D coordinate for this specific cell
                 current_coord = np.array([val_x, val_y])
-            
+                
                 # Call the mapping function for this single point
                 zVal[idx_y, idx_x] = target_map.map(current_coord)
 
@@ -210,16 +227,17 @@ class MazeEnv(gym.Env):
         # extent: maps the array indices to the actual coordinate values
         # [xmin, xmax, ymin, ymax]
         # origin='lower': puts (0,0) at the bottom left
-        im = ax.imshow(zVal, 
-                    extent=[x_range[0], x_range[-1], y_range[0], y_range[-1]], 
-                    origin='lower', 
-                    aspect='equal', 
-                    cmap='viridis')
+        im = ax.imshow(zVal,
+            extent=[self.lowerLeft[0] , self.upperRight[0] ,
+            self.lowerLeft[1], self.upperRight[1] ],
+            origin='lower', aspect='equal', cmap='viridis')
     
         plt.colorbar(im, ax=ax, label='Heatmap Value')
         ax.set_xlabel('X ')
         ax.set_ylabel('Y ')
         ax.set_title(f'Heatmap Visualization: Map {mapInt}')
+        ax.set_xlim(self.lowerLeft[0], self.upperRight[0])
+        ax.set_ylim(self.lowerLeft[1], self.upperRight[1])
         ax.scatter(self.coords[0], self.coords[1], 
            color='red', marker='*', s=200, label='agent', edgecolors='white')
         
@@ -236,6 +254,7 @@ class MazeEnv(gym.Env):
         terminated = False
         
         if self.current_step >= self.max_steps:
+            print("Truncated")
             truncated = True
             reward = -10
             return self.getObs(), reward, terminated, truncated, {}

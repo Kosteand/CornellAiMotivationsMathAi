@@ -99,10 +99,7 @@ class HeatMappable(Protocol):
     def getRange(self) -> tuple[float, float]:
         ...
     def generate_heatmap(self, noise=0, blockSize=1) -> np.ndarray:
-        ...
-    
-      
-        
+        ...  
 
 class DistanceTarget():
     def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
@@ -159,7 +156,7 @@ class LInftyDistanceTarget():
         return generate_heatmap_impl(self, noise, blockSize)
 
 class DistanceFromMiddle():
-    def __init__(self, lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
+    def __init__(self,targetCords:NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
         if not (lowLeft.size == topRight.size):
             raise Exception("Wrong size inputs")
         if np.any(lowLeft >= topRight):
@@ -230,7 +227,7 @@ class DirectionWrap():
         heatmap: The original HeatMappable object (e.g., DistanceTarget)
         offset: A 2D vector like [0, 1] for Up, [0, -1] for Down, etc.
         """
-        self.heatmap = heatmap
+        self.underlyingMap = heatmap
         self.offset = np.array(offset)
         
     def map(self, current_coords: npt.NDArray[np.int_]) -> np.float32:
@@ -239,10 +236,10 @@ class DirectionWrap():
         Essentially 'looking' one step in a specific direction.
         """
         look_ahead_point = current_coords + self.offset
-        return self.heatmap.map(look_ahead_point)
+        return self.underlyingMap.map(look_ahead_point)
         
     def getRange(self) -> tuple[float, float]:
-        return self.heatmap.range
+        return self.underlyingMap.getRange()
 class NoiseWrap:
     def __init__(self, targetMap: HeatMappable, noiseLevel: float = 0.05):
         """
