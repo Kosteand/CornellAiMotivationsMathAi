@@ -156,8 +156,8 @@ class MazeEnv(gym.Env):
         self.maps = self.buildMaps()
         observation = self.getObs()
         info = {}
-        print(self.num_cols)
-        print(self.num_rows)
+        #print(self.num_cols)
+        #print(self.num_rows)
         #TODO
 
 
@@ -254,7 +254,6 @@ class MazeEnv(gym.Env):
         terminated = False
         
         if self.current_step >= self.max_steps:
-            print("Truncated")
             truncated = True
             reward = -10
             return self.getObs(), reward, terminated, truncated, {}
@@ -278,7 +277,6 @@ class MazeEnv(gym.Env):
         hits = np.all(matches, axis=1)
 
         if np.any(hits):
-            print("Target hit")
             # Get the index of the first target hit
             target_idx = np.where(hits)[0][0]
             reward = self.targetAwards[target_idx]

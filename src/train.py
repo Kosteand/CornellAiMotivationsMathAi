@@ -161,7 +161,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Running RL Training on: {device.upper()}")
 
 saveWeights = True
-load_weights = False
+load_weights = False 
 
 actor_weights_path = "weights/actor_weights.h5"
 critic_weights_path = "weights/critic_weights.h5"
@@ -216,14 +216,14 @@ actionShape = env.single_action_space.n
 
 #Defining core constants
 criticLr = 0.0001
-actorLr = 0.0003
-nUpdates = 3000
-nStepsPerUpdate = 64
+actorLr = 0.0001
+nUpdates = 5000
+nStepsPerUpdate = 256
 
 gamma = 0.99
 lam = 0.95
 beginEntropy = 0.15
-endEntropy = 0.05
+endEntropy = 0.01
 entropyBonus = beginEntropy
 
 if saveWeights:
@@ -389,15 +389,23 @@ if load_weights:
     agent.critic.eval()
 agent.critic.eval()
 agent.actor.eval()
+heatMapTypes = [ ManhattanDistanceFromMiddle,DistanceTarget,ManhattanDistanceTarget, lookU, lookD, lookR, lookL]
+        # Create your specific env
+        
+low = np.array([0, 0])
+high = np.array([100, 100])
+
+spawn = np.array([5, 5])
+target_coords = np.array([[35, 40], [70,20]])
+target_awards = np.array([10, 5])
 
 evalEnv = MazeEnv(low, high, spawn, target_awards, target_coords, 
-                   dummy_heatmap_ManhattanMid, dummy_Heatmap_Target_Dist, 
-                   dummy_Heatmap_Target_Dist_Manhat,lookU, lookD, lookR, lookL)
+                   heatMapTypes=heatMapTypes)
 evalEnv = FlattenObservation(evalEnv)
 resetOptions = {
-            "randomSpawn": True, 
-            "randomSize": True, 
-            "randomTargetCoords": True
+            "randomSpawn": False, 
+            "randomSize": False, 
+            "randomTargetCoords": False
 }
 obs, info = evalEnv.reset(options=resetOptions)
 done = False
@@ -410,12 +418,10 @@ with torch.no_grad(): # No training pytorch stuff
         
         # 2. Pick the BEST action (Argmax)
         action = torch.argmax(actionLogits, dim=-1).item()
-
-        action = actions.item()
         
         # 3. Step the environment
         obs, reward, terminated, truncated, info = evalEnv.step(action)
-        evalEnv.unwrapped.visualize(1)
+        evalEnv.unwrapped.visualize(0)
         print(evalEnv.unwrapped.coords)
         totalReward += reward
         done = terminated or truncated
