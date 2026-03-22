@@ -169,6 +169,9 @@ critic_weights_path = "weights/critic_weights.h5"
  # 3. Create Environment with Rendering
 low = np.array([0, 0])
 high = np.array([100, 100])
+num_cols = high[0] - low[0] + 1
+num_rows = high[1] - low[1] + 1
+walls = np.zeros((num_cols, num_rows), dtype=bool)
 
 spawn = np.array([5, 5])
 target_coords = np.array([[35, 40], [70,20]])
@@ -201,7 +204,7 @@ def makeEnv():
     def _init():
         heatMapTypes = [ManhattanDistanceTarget, ManhattanDistanceFromMiddle,DistanceTarget, lookU, lookD, lookR, lookL]
         # Create your specific env
-        env = MazeEnv(low, high, spawn, target_awards, target_coords, heatMapTypes=heatMapTypes)
+        env = MazeEnv(low, high, spawn, target_awards, target_coords, heatMapTypes=heatMapTypes, walls=walls)
         # Apply the same wrappers
         env = FlattenObservation(env)
         return env
