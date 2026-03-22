@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy.typing as npt
 from datetime import datetime
 from functools import partial
+from generateWalls import generateWalls
 
 
 class MazeEnv(gym.Env):
@@ -147,33 +148,40 @@ class MazeEnv(gym.Env):
             self.upperRight = self.lowerLeft+[random_x_size,random_y_size]
             self.num_cols = self.upperRight[0] - self.lowerLeft[0] + 1
             self.num_rows = self.upperRight[1] - self.lowerLeft[1] + 1
-            self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
+            self.walls = generateWalls(self.num_cols, self.num_rows, 2, 5, 0.4)
         
         if(randomSpawn or randomSize):
-            random_x = self.np_random.integers(self.lowerLeft[0], self.upperRight[0])
-            random_y = self.np_random.integers(self.lowerLeft[1], self.upperRight[1])
-            self.coords = np.array([random_x, random_y])
+            foundValidSpawn = False
+            while not foundValidSpawn:
+                random_x = self.np_random.integers(self.lowerLeft[0], self.upperRight[0])
+                random_y = self.np_random.integers(self.lowerLeft[1], self.upperRight[1])
+                if not self.walls[random_x - self.lowerLeft[0], random_y - self.lowerLeft[1]]:
+                    foundValidSpawn=True
+                    self.coords = np.array([random_x, random_y])
         else:
             self.coords = self.spawn.copy()
             
-        if (randomTargetCoords):
-            # Create a new array for the targets to avoid modifying the original list
-            new_targets = []
-            for _ in range(len(self.targetCords)):
-                # Generate random X and Y within the current world bounds
-                tx = self.np_random.integers(self.lowerLeft[0], self.upperRight[0] + 1)
-                ty = self.np_random.integers(self.lowerLeft[1], self.upperRight[1] + 1)
-                new_targets.append([tx, ty])
-            self.targetCords = np.array(new_targets)
-        # Simple way to ensure spawn isn't a target
-        while any(np.array_equal(self.coords, t) for t in self.targetCords):
-            self.coords = self.np_random.integers(self.lowerLeft, self.upperRight + 1, size=2)
+        if randomTargetCoords:
+          occupied = set()
+          
+          # mark spawn as occupied so targets don't land on it
+          occupied.add((int(self.coords[0]), int(self.coords[1])))
+          
+          new_targets = []
+          for _ in range(len(self.targetCords)):
+              while True:
+                  tx = int(self.np_random.integers(self.lowerLeft[0], self.upperRight[0] + 1))
+                  ty = int(self.np_random.integers(self.lowerLeft[1], self.upperRight[1] + 1))
+                  xi = tx - self.lowerLeft[0]
+                  yi = ty - self.lowerLeft[1]
+                  if not self.walls[xi, yi] and (tx, ty) not in occupied:
+                      occupied.add((tx, ty))
+                      new_targets.append([tx, ty])
+                      break
+          self.targetCords = np.array(new_targets)
         self.maps = self.buildMaps()
         observation = self.getObs()
         info = {}
-        #print(self.num_cols)
-        #print(self.num_rows)
-        #TODO
 
 
         return observation, info
@@ -256,10 +264,29 @@ class MazeEnv(gym.Env):
         ax.scatter(self.coords[0], self.coords[1], 
            color='red', marker='*', s=200, label='agent', edgecolors='white')
         
-        # !!!!! Ekadh add visualization here
+        # build a wall overlay array in (y, x) order to match imshow
+        wall_overlay = np.zeros((len(y_range), len(x_range)))
+        for idx_y, val_y in enumerate(y_range):
+            for idx_x, val_x in enumerate(x_range):
+                xi = val_x - self.lowerLeft[0]
+                yi = val_y - self.lowerLeft[1]
+                if self.walls[xi, yi]:
+                    wall_overlay[idx_y, idx_x] = 1
+
+        # mask so only wall cells are drawn, then overlay in solid grey
+        wall_masked = np.ma.masked_where(wall_overlay == 0, wall_overlay)
+        ax.imshow(wall_masked, extent=[self.lowerLeft[0], self.upperRight[0],
+                  self.lowerLeft[1], self.upperRight[1]],
+                  origin='lower', aspect='equal', cmap='gray', vmin=0, vmax=1, alpha=0.6)
+
+        # plot targets
+        for i, coord in enumerate(self.targetCords):
+            ax.scatter(coord[0], coord[1], color='yellow', marker='X',
+                      s=150, label=f'target {i}' if i == 0 else '', edgecolors='black')
 
         # Save and cleanup
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ax.legend(loc='upper right')
         plt.savefig(f"./visualize/heatmap__{mapInt}_{timestamp}.png")        
         plt.close(fig)
 
