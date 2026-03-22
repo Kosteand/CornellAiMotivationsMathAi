@@ -8,6 +8,7 @@ from Utilities.HeatMap import DistanceTarget, HeatMappable, LInftyDistanceTarget
 import matplotlib.pyplot as plt
 import numpy.typing as npt
 from datetime import datetime
+from functools import partial
 
 
 class MazeEnv(gym.Env):
@@ -101,23 +102,37 @@ class MazeEnv(gym.Env):
         
         maps = []
         for mapType in self.heatMapTypes:
-            if isinstance(mapType, type):
-                innitSignature = inspect.signature(mapType.__init__)
-            else:
-                innitSignature = inspect.signature(mapType)
-            kwargs = {k: v for k, v in env_context.items() if k in innitSignature.parameters.keys()}
-            if any(p.kind == p.VAR_KEYWORD for p in innitSignature.parameters.values()):
+            if isinstance(mapType, partial):
+                # Always pass everything to partials, DirectionWrap filters internally
                 maps.append(mapType(**env_context))
+            elif isinstance(mapType, type):
+                sig = inspect.signature(mapType.__init__)
+                has_var_keyword = any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values())
+                if has_var_keyword:
+                    maps.append(mapType(**env_context))
+                else:
+                    kwargs = {k: v for k, v in env_context.items() if k in sig.parameters}
+                    maps.append(mapType(**kwargs))
             else:
+                sig = inspect.signature(mapType)
+                kwargs = {k: v for k, v in env_context.items() if k in sig.parameters}
                 maps.append(mapType(**kwargs))
-        return maps 
+        return maps
     
     def reset(self, seed=None, options=None):
         # Gymnasium reset must handle seeds and return (obs, info)
         opts = options if options is not None else {}
+    
+        # If new options provided, save them for future auto-resets
+        if options is not None:
+            self._reset_options = opts
+        else:
+            # Use saved options from last manual reset
+            opts = getattr(self, '_reset_options', {})
         randomSize = opts.get("randomSize", False)
         randomSpawn = opts.get("randomSpawn", False)
         randomTargetCoords = opts.get("randomTargetCoords", False)
+        self.max_steps = opts.get("max_steps", self.max_steps)
         super().reset(seed=seed)
         self.current_step = 0
         if(randomSize):
@@ -270,25 +285,22 @@ class MazeEnv(gym.Env):
             self.coords = self.coords+[0,change]
         else:
             self.coords = self.coords+[change,0]
-        matches = (self.targetCords == self.coords)
 
         # 2. A target is hit only if BOTH x and y match (logical AND across axis 1)
         # hits will be a 1D boolean array of shape (N,)
-        hits = np.all(matches, axis=1)
-
-        if np.any(hits):
-            # Get the index of the first target hit
-            target_idx = np.where(hits)[0][0]
-            reward = self.targetAwards[target_idx]
+        hits = np.where(
+             np.all(self.targetCords == self.coords[None, :], axis=1)
+        )[0]
+        if len(hits) > 0:
+            reward = self.targetAwards[hits[0]]
             terminated = True
         else:
-            # Check if we hit a wall (already calculated) or just a normal step
             if not self._is_valid_position(self.coords):
                 self.coords = oldLoc
                 reward = -0.1
             else:
                 reward = -0.01
-                
+              
         truncated  = False
         return self.getObs(), reward, terminated, truncated, {}
             

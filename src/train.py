@@ -8,9 +8,14 @@ import torch
 import torch.nn as nn
 from torch import optim
 from tqdm import tqdm
+from functools import partial
 
+import cProfile
+import pstats
+import io
 
-
+profiler = cProfile.Profile()
+profiler.enable()
 
 class ActoCritic(nn.Module):
     def __init__(
@@ -179,7 +184,7 @@ dummy_heatmap_ManhattanMid = ManhattanDistanceFromMiddle(lowLeft=low, topRight=h
 dummy_Heatmap_Target_Dist = DistanceTarget(lowLeft=low,topRight=high, targetCords=target_coords)
 
 dummy_Heatmap_Target_Dist_Manhat = ManhattanDistanceTarget(lowLeft=low,topRight=high, targetCords=target_coords)
-lookU = lambda lowLeft, topRight, targetCords: DirectionWrap(
+'''lookU = lambda lowLeft, topRight, targetCords: DirectionWrap(
     ManhattanDistanceTarget(lowLeft=lowLeft, topRight=topRight, targetCords=targetCords), 
     offset=np.array([0, 1]))
 
@@ -193,13 +198,20 @@ lookR = lambda lowLeft, topRight, targetCords: DirectionWrap(
 
 lookL = lambda lowLeft, topRight, targetCords: DirectionWrap(
     ManhattanDistanceTarget(lowLeft=lowLeft, topRight=topRight, targetCords=targetCords), 
-    offset=np.array([-1, 0]))
+    offset=np.array([-1, 0]))'''
 
 
 def makeEnv():
     
     def _init():
-        heatMapTypes = [ManhattanDistanceTarget, ManhattanDistanceFromMiddle,DistanceTarget, lookU, lookD, lookR, lookL]
+        heatMapTypes = [
+            ManhattanDistanceTarget,
+            DistanceTarget,
+            partial(DirectionWrap, inner_map_type=ManhattanDistanceTarget, offset=np.array([0,  1])),
+            partial(DirectionWrap, inner_map_type=ManhattanDistanceTarget, offset=np.array([0, -1])),
+            partial(DirectionWrap, inner_map_type=DistanceTarget,          offset=np.array([1,  0])),
+            partial(DirectionWrap, inner_map_type=DistanceTarget,          offset=np.array([-1, 0])),
+]
         # Create your specific env
         env = MazeEnv(low, high, spawn, target_awards, target_coords, heatMapTypes=heatMapTypes)
         # Apply the same wrappers
@@ -207,17 +219,17 @@ def makeEnv():
         return env
     return _init
 
-nEnvs = 4
+nEnvs = 16
 
-env = gym.vector.SyncVectorEnv([makeEnv() for _ in range(nEnvs)])
+env = gym.vector.AsyncVectorEnv([makeEnv() for _ in range(nEnvs)])
 
 obsShape = env.single_observation_space.shape[0]
 actionShape = env.single_action_space.n
 
 #Defining core constants
 criticLr = 0.0001
-actorLr = 0.0001
-nUpdates = 5000
+actorLr = 0.00005
+nUpdates = 2000
 nStepsPerUpdate = 256
 
 gamma = 0.99
@@ -237,33 +249,35 @@ if saveWeights:
     agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, nEnvs)
 
     # Vector-specific wrapper
-    envWrapper = gym.wrappers.vector.RecordEpisodeStatistics(env)
+    envWrapper = gym.wrappers.vector.RecordEpisodeStatistics(env, buffer_length=10000)
     criticLosses = []
     actorLosses = []
     entropies = []
     current_max_steps = 1000
     min_steps = 250
     step_decay = 15
+    resetOptions = {
+    "randomSpawn": True,
+    "randomSize": True, 
+    "randomTargetCoords": True,
+    "max_steps": current_max_steps
+}
+           
+           
     
     for samplePhase in tqdm(range(nUpdates)):
         entropyBonus = max(0.05,beginEntropy - (samplePhase*2 / nUpdates) * (beginEntropy - endEntropy))
         if samplePhase % 100 == 0 and current_max_steps > min_steps:
             current_max_steps -= step_decay
             # New step val in all 4 envs
-            env.set_attr("max_steps", current_max_steps)
             print(f"Tightening the clock! New Max Steps: {current_max_steps}")
-        
+            
         epValuePreds = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
         epRewards = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
         epActionLogProbs = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
         masks = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
 
         if(samplePhase==0):
-            resetOptions = {
-            "randomSpawn": True, 
-            "randomSize": True, 
-            "randomTargetCoords": True
-}
             states,__ = envWrapper.reset(options=resetOptions)
             
         epEntropies = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
@@ -282,6 +296,9 @@ if saveWeights:
             epActionLogProbs[step] = actionLogProbs
             
             masks[step] = torch.tensor([not term for term in terminated])
+            
+            # MAYBE DELETE TODO
+            epRewards = (epRewards - epRewards.mean()) / (epRewards.std() + 1e-8)
 
             # calculate the losses for actor and critic
         critic_loss, actor_loss = agent.get_losses(
@@ -305,10 +322,20 @@ if saveWeights:
         entropies.append(entropy.detach().mean().cpu().numpy())
 
 
+    """Stuff for that profiler"""
+    
+    profiler.disable()
+    stream = io.StringIO()
+    stats = pstats.Stats(profiler, stream=stream)
+    stats.sort_stats('cumulative')
+    stats.print_stats(20)
+    print(stream.getvalue())
+    profiler.dump_stats("./visualize/profile_output.prof")
 
     """ plot the results """
 
     # %matplotlib inline
+    
 
     rolling_length = 20
     fig, axs = plt.subplots(nrows=2, ncols=2, figsize=(12, 5))
@@ -403,9 +430,10 @@ evalEnv = MazeEnv(low, high, spawn, target_awards, target_coords,
                    heatMapTypes=heatMapTypes)
 evalEnv = FlattenObservation(evalEnv)
 resetOptions = {
-            "randomSpawn": False, 
-            "randomSize": False, 
-            "randomTargetCoords": False
+    "randomSpawn": True,
+    "randomSize": True, 
+    "randomTargetCoords": True,
+    "max_steps": current_max_steps
 }
 obs, info = evalEnv.reset(options=resetOptions)
 done = False

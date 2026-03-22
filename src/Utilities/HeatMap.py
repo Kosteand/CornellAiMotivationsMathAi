@@ -1,3 +1,5 @@
+import inspect
+
 import numpy as np
 import random
 from numpy.typing import NDArray
@@ -221,25 +223,20 @@ class LInftyDistanceFromMiddle():
     def generate_heatmap(self, noise=0, blockSize=1):
         return generate_heatmap_impl(self, noise, blockSize)
     
-class DirectionWrap():
-    def __init__(self, heatmap: HeatMappable, offset: npt.NDArray[np.int_]):
-        """
-        heatmap: The original HeatMappable object (e.g., DistanceTarget)
-        offset: A 2D vector like [0, 1] for Up, [0, -1] for Down, etc.
-        """
-        self.underlyingMap = heatmap
-        self.offset = np.array(offset)
-        
-    def map(self, current_coords: npt.NDArray[np.int_]) -> np.float32:
-        """
-        Returns the heatmap value at the agent's position + the offset.
-        Essentially 'looking' one step in a specific direction.
-        """
-        look_ahead_point = current_coords + self.offset
-        return self.underlyingMap.map(look_ahead_point)
-        
-    def getRange(self) -> tuple[float, float]:
-        return self.underlyingMap.getRange()
+class DirectionWrap(HeatMappable):
+    def __init__(self, inner_map_type, offset, **kwargs):
+         # Filter kwargs to only what inner_map_type accepts
+        inner_sig = inspect.signature(inner_map_type.__init__)
+        if any(p.kind == p.VAR_KEYWORD for p in inner_sig.parameters.values()):
+            filtered = kwargs
+        else:
+            filtered = {k: v for k, v in kwargs.items() if k in inner_sig.parameters}
+        self.inner = inner_map_type(**filtered)
+        self.offset = offset
+    def map(self, coords):
+        return self.inner.map(coords + self.offset)
+    def getRange(self):
+        return self.inner.getRange()
 class NoiseWrap:
     def __init__(self, targetMap: HeatMappable, noiseLevel: float = 0.05):
         """

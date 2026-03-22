@@ -16,3 +16,4 @@ tqdm
 openpyxl
 pandas
 opencv-python-headless
+functools
