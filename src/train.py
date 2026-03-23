@@ -27,15 +27,21 @@ class ActoCritic(nn.Module):
         critic_lr: np.float32,
         actor_lr: np.float32,
         n_envs: int,
+        lstm_hidden_size: int = 128,
+        lstm_num_layers: int = 2,
     ) -> None:
         
         super().__init__()
         self.device = device
         self.n_envs = n_envs
+        self.lstm_hidden_size = lstm_hidden_size
+        self.lstm_num_layers = lstm_num_layers
         
+        self.lstm = nn.LSTM(n_features, self.lstm_hidden_size, batch_first=True).to(device)
+
 
         critic_layers = [
-            nn.Linear(n_features, 128),
+            nn.Linear(self.lstm_hidden_size, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU(),
@@ -45,7 +51,7 @@ class ActoCritic(nn.Module):
         ]
 
         actor_layers = [
-            nn.Linear(n_features, 128),
+            nn.Linear(self.lstm_hidden_size, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU(),
@@ -64,7 +70,7 @@ class ActoCritic(nn.Module):
         self.critic_optim = optim.RMSprop(self.critic.parameters(), lr=critic_lr)
         self.actor_optim = optim.RMSprop(self.actor.parameters(), lr=actor_lr)
         
-    def forward(self, x: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: np.ndarray,lstmState=None) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass of the networks.
 
@@ -76,12 +82,14 @@ class ActoCritic(nn.Module):
             action_logits_vec: A tensor with the action logits, with shape [n_envs, n_actions].
         """
         x = torch.Tensor(x).to(self.device)
+        x, lstmState = self.lstm(x.unsqueeze(1), lstmState)
+        x = x.squeeze(1)
         state_values = self.critic(x)  # shape: [n_envs,]
         action_logits_vec = self.actor(x)  # shape: [n_envs, n_actions]
-        return (state_values, action_logits_vec)
+        return (state_values, action_logits_vec, lstmState)
 
     def select_action(
-        self, x: np.ndarray
+        self, x: np.ndarray, lstmState=None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns a tuple of the chosen actions and the log-probs of those actions.
@@ -94,14 +102,14 @@ class ActoCritic(nn.Module):
             action_log_probs: A tensor with the log-probs of the actions, with shape [n_steps_per_update, n_envs].
             state_values: A tensor with the state values, with shape [n_steps_per_update, n_envs].
         """
-        state_values, action_logits = self.forward(x)
+        stateValues, action_logits, lstmState = self.forward(x, lstmState)
         action_pd = torch.distributions.Categorical(
             logits=action_logits
         )  # implicitly uses softmax
         actions = action_pd.sample()
         action_log_probs = action_pd.log_prob(actions)
         entropy = action_pd.entropy()
-        return (actions, action_log_probs, state_values, entropy)
+        return (actions, action_log_probs, stateValues, entropy, lstmState)
 
     def get_losses(
         self,
@@ -151,7 +159,7 @@ class ActoCritic(nn.Module):
             actor_loss: The actor loss.
         """
         self.critic_optim.zero_grad()
-        critic_loss.backward()
+        critic_loss.backward(retain_graph=True)
         nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=0.5)
 
         self.critic_optim.step()
@@ -167,7 +175,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Running RL Training on: {device.upper()}")
 
 saveWeights = True
-load_weights = False 
+load_weights = False
 
 actor_weights_path = "weights/actor_weights.h5"
 critic_weights_path = "weights/critic_weights.h5"
@@ -205,6 +213,7 @@ lookL = lambda lowLeft, topRight, targetCords: DirectionWrap(
     offset=np.array([-1, 0]))'''
 
 
+
 def makeEnv():
     
     def _init():
@@ -231,7 +240,7 @@ actionShape = env.single_action_space.n
 #Defining core constants
 criticLr = 0.0001
 actorLr = 0.00005
-nUpdates = 4000
+nUpdates = 5000
 nStepsPerUpdate = 256
 
 gamma = 0.99
@@ -240,16 +249,18 @@ beginEntropy = 0.15
 endEntropy = 0.01
 entropyBonus = beginEntropy
 
+lstmState = None 
+
 if saveWeights:
 
-    agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, nEnvs)
+    agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, nEnvs, 256, 2)
 
     # Vector-specific wrapper
     envWrapper = gym.wrappers.vector.RecordEpisodeStatistics(env, buffer_length=10000)
     criticLosses = []
     actorLosses = []
     entropies = []
-    current_max_steps = 1000
+    current_max_steps = 20
     min_steps = 250
     step_decay = 15
     resetOptions = {
@@ -265,6 +276,8 @@ if saveWeights:
         entropyBonus = max(0.05,beginEntropy - (samplePhase*2 / nUpdates) * (beginEntropy - endEntropy))
         if samplePhase % 100 == 0 and current_max_steps > min_steps:
             current_max_steps -= step_decay
+
+            env.set_attr("max_steps", current_max_steps) 
             # New step val in all 4 envs
             print(f"Tightening the clock! New Max Steps: {current_max_steps}")
         # anneal gamma if needed:gamma = 0.95 + 0.04 * (current_max_steps - min_steps) / (1000 - min_steps)
@@ -281,21 +294,35 @@ if saveWeights:
         
         
         for step in range(nStepsPerUpdate):
-            actions, actionLogProbs, stateValuePreds, entropy = agent.select_action(
-            states)
+            actions, actionLogProbs, stateValuePreds, entropy, lstmState = agent.select_action(
+            states, lstmState)
             epEntropies[step] = entropy
             states, rewards, terminated, truncated, infos = envWrapper.step(
             actions.cpu().numpy())
+            
+            dones = torch.tensor(
+            [term or trunc for term, trunc in zip(terminated, truncated)],
+            dtype=torch.float32, device=device)
+        
+            if lstmState is not None:
+                h, c = lstmState
+                # Zero out hidden state for finished envs
+                mask = (1 - dones).view(1, -1, 1)
+                lsmtState = (h * mask, c * mask)
             
             
             epValuePreds[step] = torch.squeeze(stateValuePreds)
             epRewards[step] = torch.tensor(rewards, device=device)
             epActionLogProbs[step] = actionLogProbs
             
-            masks[step] = torch.tensor([not term for term in terminated])
+            if lstmState is not None:
+                lstmState = (lstmState[0].detach(), lstmState[1].detach())
+            
+            masks[step] = torch.tensor([not (term or trunc) for term, trunc in zip(terminated, truncated)])
+
             
             # MAYBE DELETE TODO
-        epRewards = (epRewards - epRewards.mean()) / (epRewards.std() + 1e-8)
+        #epRewards = (epRewards - epRewards.mean()) / (epRewards.std() + 1e-8)
 
             # calculate the losses for actor and critic
         critic_loss, actor_loss = agent.get_losses(
@@ -434,23 +461,26 @@ resetOptions = {
     "randomSpawn": True,
     "randomSize": True, 
     "randomTargetCoords": True,
-    "max_steps": current_max_steps
+    "max_steps": 1000
 }
 obs, info = evalEnv.reset(options=resetOptions)
 done = False
 totalReward = 0
 
+lstmState = None
+
+
 with torch.no_grad(): # No training pytorch stuff
     while not done:
         # 1. Get the action (add a batch dimension with [None, :] for the network)
-        _, actionLogits = agent.forward(obs[None, :])
+        _, actionLogits, lstmState = agent.forward(obs[None, :], lstmState)
         
         # 2. Pick the BEST action (Argmax)
         action = torch.argmax(actionLogits, dim=-1).item()
         
         # 3. Step the environment
         obs, reward, terminated, truncated, info = evalEnv.step(action)
-        #evalEnv.unwrapped.visualize(0)
+        evalEnv.unwrapped.visualize(0)
         print(evalEnv.unwrapped.coords)
         totalReward += reward
         done = terminated or truncated

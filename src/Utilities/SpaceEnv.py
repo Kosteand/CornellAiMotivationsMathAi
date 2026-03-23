@@ -25,7 +25,7 @@ class MazeEnv(gym.Env):
                  walls: np.ndarray | None = None):
         super(MazeEnv, self).__init__()
         self.heatMapTypes = heatMapTypes
-        self.max_steps = 1000  # Default starting limit
+        self.max_steps = 1000  # Default starting limit decays
         self.current_step = 0
         self.lowerLeft = np.array(lowerLeft)
         self.upperRight = np.array(upperRight)
@@ -38,7 +38,7 @@ class MazeEnv(gym.Env):
         self.maps = self.buildMaps()
         ##For when pure python is better than vectorized
         self.targetsTuple = set(map(tuple, self.targetCords.tolist()))
-
+        self.walls = generateWalls(num_cols=self.num_cols, num_rows=self.num_rows)
 
         if not (self.lowerLeft.shape == (2,) and 
                 self.upperRight.shape == (2,) and 
@@ -148,9 +148,9 @@ class MazeEnv(gym.Env):
             self.num_cols = self.upperRight[0] - self.lowerLeft[0] + 1
             self.num_rows = self.upperRight[1] - self.lowerLeft[1] + 1
             #TO stop walls from gettign in the way until they are fully impl
-            self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
+            #self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
 
-            #self.walls = generateWalls(self.num_cols, self.num_rows, 2, 5, 0.4)
+            self.walls = generateWalls(self.num_cols, self.num_rows, 2, 5, 0.4)
             #self.walls = np.zeros(self.num_cols,self.num_rows)
         
         if(randomSpawn or randomSize):
@@ -279,7 +279,7 @@ class MazeEnv(gym.Env):
         wall_masked = np.ma.masked_where(wall_overlay == 0, wall_overlay)
         ax.imshow(wall_masked, extent=[self.lowerLeft[0], self.upperRight[0],
                   self.lowerLeft[1], self.upperRight[1]],
-                  origin='lower', aspect='equal', cmap='gray', vmin=0, vmax=1, alpha=0.6)
+                  origin='lower', aspect='equal', cmap='gray', vmin=0, vmax=1, alpha=0.8)
 
         # plot targets
         for i, coord in enumerate(self.targetCords):
@@ -299,10 +299,9 @@ class MazeEnv(gym.Env):
         
         if self.current_step >= self.max_steps:
             truncated = True
-            reward = -1
+            reward = -0.01
             return self.getObs(), reward, terminated, truncated, {}
-            
-            
+ 
         direction = action
         stepSize = 1
         if direction%2 == 0:
