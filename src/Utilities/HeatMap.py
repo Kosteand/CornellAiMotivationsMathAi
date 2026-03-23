@@ -111,7 +111,14 @@ class DistanceTarget():
         self.dimension = targetCords.shape[-1]
 
     def map(self, cordArr: NDArray[np.int_]) -> np.int_:
-        return np.min(np.linalg.norm(self.targetCords - cordArr, axis=1))
+        min_dist = float('inf')
+        x, y = int(cordArr[0]), int(cordArr[1])
+        for tx, ty in self.targetCords:
+            dx, dy = int(tx) - x, int(ty) - y
+            d = (dx*dx + dy*dy) ** 0.5
+            if d < min_dist:
+                min_dist = d
+        return min_dist
 
     def getRange(self) -> tuple[float, float]:
         corners = np.array(np.meshgrid(*zip(self.lowLeft, self.topRight))).T.reshape(-1, self.dimension)
@@ -129,7 +136,13 @@ class ManhattanDistanceTarget():
         self.dimension = targetCords.shape[-1]
 
     def map(self, cordArr: NDArray[np.int_]) -> np.int_:
-        return np.min(np.sum(np.abs(self.targetCords - cordArr), axis=1))
+        min_dist = float('inf')
+        x, y = int(cordArr[0]), int(cordArr[1])
+        for tx, ty in self.targetCords:
+            d = abs(int(tx) - x) + abs(int(ty) - y)
+            if d < min_dist:
+                min_dist = d
+        return min_dist
 
     def getRange(self) -> tuple[float, float]:
         corners = np.array(np.meshgrid(*zip(self.lowLeft, self.topRight))).T.reshape(-1, self.dimension)
@@ -171,7 +184,8 @@ class DistanceFromMiddle():
     def map(self, cordArr: NDArray[np.int_]) -> np.int_:
         if not (cordArr.size == self.dimension):
             raise Exception("Wrong array size")
-        return np.linalg.norm(cordArr - self.midPoint)
+        diffs = self.midPoint - cordArr
+        return float(np.sqrt((diffs**2).sum()))
 
     def getRange(self) -> tuple[float, float]:
         return (0.0, float(np.linalg.norm(self.topRight - self.midPoint)))
@@ -193,7 +207,9 @@ class ManhattanDistanceFromMiddle():
     def map(self, cordArr: NDArray[np.int_]) -> np.int_:
         if not (cordArr.size == self.dimension):
             raise Exception("Wrong array size")
-        return np.sum(np.abs(cordArr - self.midPoint))
+        return int(np.abs(self.midPoint - cordArr).sum())
+
+
 
     def getRange(self) -> tuple[float, float]:
         return (0.0, float(np.sum(np.abs(self.topRight - self.midPoint))))
@@ -232,7 +248,7 @@ class DirectionWrap(HeatMappable):
         else:
             filtered = {k: v for k, v in kwargs.items() if k in inner_sig.parameters}
         self.inner = inner_map_type(**filtered)
-        self.offset = offset
+        self.offset = np.array(offset)
     def map(self, coords):
         return self.inner.map(coords + self.offset)
     def getRange(self):

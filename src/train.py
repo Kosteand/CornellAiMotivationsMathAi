@@ -13,9 +13,10 @@ from functools import partial
 import cProfile
 import pstats
 import io
-
-profiler = cProfile.Profile()
-profiler.enable()
+useProfiler = False
+if(useProfiler):
+    profiler = cProfile.Profile()
+    profiler.enable()
 
 class ActoCritic(nn.Module):
     def __init__(
@@ -217,14 +218,12 @@ def makeEnv():
 ]
         # Create your specific env
         env = MazeEnv(low, high, spawn, target_awards, target_coords, heatMapTypes=heatMapTypes, walls=walls)
-        # Apply the same wrappers
-        env = FlattenObservation(env)
         return env
     return _init
 
-nEnvs = 16
+nEnvs = 22
 
-env = gym.vector.AsyncVectorEnv([makeEnv() for _ in range(nEnvs)])
+env = gym.vector.SyncVectorEnv([makeEnv() for _ in range(nEnvs)])
 
 obsShape = env.single_observation_space.shape[0]
 actionShape = env.single_action_space.n
@@ -232,7 +231,7 @@ actionShape = env.single_action_space.n
 #Defining core constants
 criticLr = 0.0001
 actorLr = 0.00005
-nUpdates = 2000
+nUpdates = 4000
 nStepsPerUpdate = 256
 
 gamma = 0.99
@@ -242,12 +241,6 @@ endEntropy = 0.01
 entropyBonus = beginEntropy
 
 if saveWeights:
-
-
-
-
-
-
 
     agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, nEnvs)
 
@@ -274,6 +267,7 @@ if saveWeights:
             current_max_steps -= step_decay
             # New step val in all 4 envs
             print(f"Tightening the clock! New Max Steps: {current_max_steps}")
+        # anneal gamma if needed:gamma = 0.95 + 0.04 * (current_max_steps - min_steps) / (1000 - min_steps)
             
         epValuePreds = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
         epRewards = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
@@ -301,7 +295,7 @@ if saveWeights:
             masks[step] = torch.tensor([not term for term in terminated])
             
             # MAYBE DELETE TODO
-            epRewards = (epRewards - epRewards.mean()) / (epRewards.std() + 1e-8)
+        epRewards = (epRewards - epRewards.mean()) / (epRewards.std() + 1e-8)
 
             # calculate the losses for actor and critic
         critic_loss, actor_loss = agent.get_losses(
@@ -326,14 +320,14 @@ if saveWeights:
 
 
     """Stuff for that profiler"""
-    
-    profiler.disable()
-    stream = io.StringIO()
-    stats = pstats.Stats(profiler, stream=stream)
-    stats.sort_stats('cumulative')
-    stats.print_stats(20)
-    print(stream.getvalue())
-    profiler.dump_stats("./visualize/profile_output.prof")
+    if(useProfiler):
+        profiler.disable()
+        stream = io.StringIO()
+        stats = pstats.Stats(profiler, stream=stream)
+        stats.sort_stats('cumulative')
+        stats.print_stats(20)
+        print(stream.getvalue())
+        profiler.dump_stats("./visualize/profile_output.prof")
 
     """ plot the results """
 
@@ -418,9 +412,7 @@ if load_weights:
     agent.actor.eval()
     agent.critic.eval()
 agent.critic.eval()
-agent.actor.eval()
-heatMapTypes = [ ManhattanDistanceFromMiddle,DistanceTarget,ManhattanDistanceTarget, lookU, lookD, lookR, lookL]
-        # Create your specific env
+agent.actor.eval()        # Create your specific env
         
 low = np.array([0, 0])
 high = np.array([100, 100])
@@ -428,10 +420,16 @@ high = np.array([100, 100])
 spawn = np.array([5, 5])
 target_coords = np.array([[35, 40], [70,20]])
 target_awards = np.array([10, 5])
-
+evalHeatMapTypes = [
+            ManhattanDistanceTarget,
+            DistanceTarget,
+            partial(DirectionWrap, inner_map_type=ManhattanDistanceTarget, offset=np.array([0,  1])),
+            partial(DirectionWrap, inner_map_type=ManhattanDistanceTarget, offset=np.array([0, -1])),
+            partial(DirectionWrap, inner_map_type=DistanceTarget,          offset=np.array([1,  0])),
+            partial(DirectionWrap, inner_map_type=DistanceTarget,          offset=np.array([-1, 0])),
+]
 evalEnv = MazeEnv(low, high, spawn, target_awards, target_coords, 
-                   heatMapTypes=heatMapTypes)
-evalEnv = FlattenObservation(evalEnv)
+                   heatMapTypes=evalHeatMapTypes)
 resetOptions = {
     "randomSpawn": True,
     "randomSize": True, 
@@ -452,7 +450,7 @@ with torch.no_grad(): # No training pytorch stuff
         
         # 3. Step the environment
         obs, reward, terminated, truncated, info = evalEnv.step(action)
-        evalEnv.unwrapped.visualize(0)
+        #evalEnv.unwrapped.visualize(0)
         print(evalEnv.unwrapped.coords)
         totalReward += reward
         done = terminated or truncated

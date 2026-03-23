@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy.typing as npt
 from datetime import datetime
 from functools import partial
-from generateWalls import generateWalls
+from Utilities.generateWalls import generateWalls
 
 
 class MazeEnv(gym.Env):
@@ -36,6 +36,9 @@ class MazeEnv(gym.Env):
         self.num_cols = self.upperRight[0] - self.lowerLeft[0] + 1
         self.num_rows = self.upperRight[1] - self.lowerLeft[1] + 1
         self.maps = self.buildMaps()
+        ##For when pure python is better than vectorized
+        self.targetsTuple = set(map(tuple, self.targetCords.tolist()))
+
 
         if not (self.lowerLeft.shape == (2,) and 
                 self.upperRight.shape == (2,) and 
@@ -74,12 +77,8 @@ class MazeEnv(gym.Env):
     
     #Size of distance obervation space is now fixed because of issues with using same weights for diff map sizes
     #TODO fix to a maxDim-shouldl be easy
-        self.observation_space = spaces.Dict({"distU":spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32), "distD":spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
-                                               "distR":spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32), "distL":spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
-                                               "typeU":spaces.Discrete(3), "typeD":spaces.Discrete(3),
-                                               "typeR":spaces.Discrete(3), "typeL":spaces.Discrete(3),
-                                               "extras":spaces.Box(low=-np.inf, high=np.inf,shape=(len(heatMapTypes),), dtype=np.float32)
-                                               })
+        obs_size = 8 + len(heatMapTypes)  # 4 dists + 4 types + extras
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32)
         
         
 
@@ -148,7 +147,11 @@ class MazeEnv(gym.Env):
             self.upperRight = self.lowerLeft+[random_x_size,random_y_size]
             self.num_cols = self.upperRight[0] - self.lowerLeft[0] + 1
             self.num_rows = self.upperRight[1] - self.lowerLeft[1] + 1
-            self.walls = generateWalls(self.num_cols, self.num_rows, 2, 5, 0.4)
+            #TO stop walls from gettign in the way until they are fully impl
+            self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
+
+            #self.walls = generateWalls(self.num_cols, self.num_rows, 2, 5, 0.4)
+            #self.walls = np.zeros(self.num_cols,self.num_rows)
         
         if(randomSpawn or randomSize):
             foundValidSpawn = False
@@ -179,6 +182,8 @@ class MazeEnv(gym.Env):
                       new_targets.append([tx, ty])
                       break
           self.targetCords = np.array(new_targets)
+        self.targetsTuple = set(map(tuple, self.targetCords.tolist()))
+
         self.maps = self.buildMaps()
         observation = self.getObs()
         info = {}
@@ -188,39 +193,36 @@ class MazeEnv(gym.Env):
     
     def _scan_direction(self, dx, dy):
         """Returns (distance, type) where type: 0=boundary/wall, 1=target"""
-        x, y = self.coords
+        x, y = int(self.coords[0]), int(self.coords[1])
+        ll0, ll1 = int(self.lowerLeft[0]), int(self.lowerLeft[1])
+        ur0, ur1 = int(self.upperRight[0]), int(self.upperRight[1])
         dist = 0
+                
         while True:
             x += dx
             y += dy
             dist += 1
-            if np.any([x, y] < self.lowerLeft) or np.any([x, y] > self.upperRight):
-                return dist - 1, 0  # hit boundary
-            xi = x - self.lowerLeft[0]
-            yi = y - self.lowerLeft[1]
-            if self.walls[xi, yi]:
-                return dist, 0      # hit wall
-            if any(np.array_equal([x, y], t) for t in self.targetCords):
-                return dist, 1      # hit target
+            # Pure Python bounds check — no numpy
+            if x < ll0 or x > ur0 or y < ll1 or y > ur1:
+                return dist - 1, 0
+            if self.walls[x - ll0, y - ll1]:
+                return dist, 0
+            # O(1) set lookup instead of O(n) array comparison
+            if (x, y) in self.targetsTuple:
+                return dist, 1
     
     def getObs(self):
-        distU = float(self.upperRight[1] - self.coords[1]) / self.num_rows
-        distD = float(self.coords[1] - self.lowerLeft[1]) / self.num_rows
-        distR = float(self.upperRight[0] - self.coords[0]) / self.num_cols
-        distL = float(self.coords[0] - self.lowerLeft[0]) / self.num_cols
-        
         distU, typeU = self._scan_direction(0, 1)
         distD, typeD = self._scan_direction(0, -1)
         distR, typeR = self._scan_direction(1, 0)
         distL, typeL = self._scan_direction(-1, 0)
-        
-        return {
-            "distU": np.array([distU / self.num_rows], dtype=np.float32), "distD": np.array([distD / self.num_rows], dtype=np.float32),
-            "distR": np.array([distR / self.num_cols], dtype=np.float32), "distL": np.array([distL / self.num_cols], dtype=np.float32),
-            "typeU": typeU, "typeD": typeD, "typeR": typeR, "typeL": typeL,
-            "extras": np.array([m.map(self.coords) for m in self.maps], dtype=np.float32)
-        }
-    
+        extras = np.array([m.map(self.coords) for m in self.maps], dtype=np.float32)
+        return np.array([
+            distU/self.num_rows, distD/self.num_rows,
+            distR/self.num_cols, distL/self.num_cols,
+            typeU, typeD, typeR, typeL,
+            *extras
+        ], dtype=np.float32)
     
     def visualize(self, mapInt):
         # 1. Access the specific heatmap
@@ -297,7 +299,7 @@ class MazeEnv(gym.Env):
         
         if self.current_step >= self.max_steps:
             truncated = True
-            reward = -10
+            reward = -1
             return self.getObs(), reward, terminated, truncated, {}
             
             
@@ -326,7 +328,7 @@ class MazeEnv(gym.Env):
                 self.coords = oldLoc
                 reward = -0.1
             else:
-                reward = -0.01
+                reward = -0.1
               
         truncated  = False
         return self.getObs(), reward, terminated, truncated, {}
@@ -334,14 +336,11 @@ class MazeEnv(gym.Env):
             
 
     def _is_valid_position(self, pos):
-        row, col = pos
-   
-        # If agent goes out of the grid
-        if np.any(pos < self.lowerLeft) or np.any(pos > self.upperRight):
+        x, y = int(pos[0]), int(pos[1])
+        ll0, ll1 = int(self.lowerLeft[0]), int(self.lowerLeft[1])
+        ur0, ur1 = int(self.upperRight[0]), int(self.upperRight[1])
+        if x < ll0 or x > ur0 or y < ll1 or y > ur1:
             return False
-        #check if the agent is going into a wall
-        x_idx = pos[0] - self.lowerLeft[0]
-        y_idx = pos[1] - self.lowerLeft[1]
-        if self.walls[x_idx, y_idx]:
-          return False
+        if self.walls[x - ll0, y - ll1]:
+            return False
         return True
