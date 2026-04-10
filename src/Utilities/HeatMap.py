@@ -128,6 +128,67 @@ class DistanceTarget():
     def generate_heatmap(self, noise=0, blockSize=1):
         return generate_heatmap_impl(self, noise, blockSize)
 
+class DijkstraDistanceTarget():
+    def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_], walls: np.ndarray):
+        self.targetCords = np.array(targetCords)
+        self.lowLeft = lowLeft
+        self.topRight = topRight
+        self.walls = walls
+        self.dimension = targetCords.shape[-1]
+        self.num_cols = int(topRight[0] - lowLeft[0] + 1)
+        self.num_rows = int(topRight[1] - lowLeft[1] + 1)
+
+        # precompute shortest path distance from every cell to its nearest target
+        self.dist_grid = self._precompute()
+
+    def _precompute(self):
+        import heapq
+
+        INF = float('inf')
+        dist = np.full((self.num_cols, self.num_rows), INF)
+
+        # multi-source Dijkstra — seed all targets with distance 0
+        heap = []
+        for tx, ty in self.targetCords:
+            xi = int(tx - self.lowLeft[0])
+            yi = int(ty - self.lowLeft[1])
+            if 0 <= xi < self.num_cols and 0 <= yi < self.num_rows:
+                dist[xi, yi] = 0.0
+                heapq.heappush(heap, (0.0, xi, yi))
+
+        while heap:
+            d, xi, yi = heapq.heappop(heap)
+
+            if d > dist[xi, yi]:
+                continue  # stale entry
+
+            for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]:
+                nxi, nyi = xi + dx, yi + dy
+                if 0 <= nxi < self.num_cols and 0 <= nyi < self.num_rows:
+                    if not self.walls[nxi, nyi]:
+                        nd = d + 1.0
+                        if nd < dist[nxi, nyi]:
+                            dist[nxi, nyi] = nd
+                            heapq.heappush(heap, (nd, nxi, nyi))
+
+        return dist
+
+    def map(self, cordArr: NDArray[np.int_]) -> float:
+        xi = int(cordArr[0] - self.lowLeft[0])
+        yi = int(cordArr[1] - self.lowLeft[1])
+        if 0 <= xi < self.num_cols and 0 <= yi < self.num_rows:
+            return float(self.dist_grid[xi, yi])
+        return float('inf')
+
+    def getRange(self) -> tuple[float, float]:
+        finite = self.dist_grid[np.isfinite(self.dist_grid)]
+        if len(finite) == 0:
+            return (0.0, 0.0)
+        return (0.0, float(np.max(finite)))
+
+    def generate_heatmap(self, noise=0, blockSize=1):
+        return generate_heatmap_impl(self, noise, blockSize)
+
 class ManhattanDistanceTarget():
     def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
         self.targetCords = targetCords
