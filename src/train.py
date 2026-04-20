@@ -26,22 +26,17 @@ class ActoCritic(nn.Module):
         device: torch.device,
         critic_lr: np.float32,
         actor_lr: np.float32,
-        n_envs: int,
-        lstm_hidden_size: int = 128,
-        lstm_num_layers: int = 2,
+        n_envs: int
     ) -> None:
         
         super().__init__()
         self.device = device
         self.n_envs = n_envs
-        self.lstm_hidden_size = lstm_hidden_size
-        self.lstm_num_layers = lstm_num_layers
+    
         
-        self.lstm = nn.LSTM(n_features, self.lstm_hidden_size, batch_first=True).to(device)
-
 
         critic_layers = [
-            nn.Linear(self.lstm_hidden_size, 128),
+            nn.Linear(n_features, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU(),
@@ -51,7 +46,7 @@ class ActoCritic(nn.Module):
         ]
 
         actor_layers = [
-            nn.Linear(self.lstm_hidden_size, 128),
+            nn.Linear(n_features, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU(),
@@ -70,7 +65,7 @@ class ActoCritic(nn.Module):
         self.critic_optim = optim.RMSprop(self.critic.parameters(), lr=critic_lr)
         self.actor_optim = optim.RMSprop(self.actor.parameters(), lr=actor_lr)
         
-    def forward(self, x: np.ndarray,lstmState=None) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass of the networks.
 
@@ -82,14 +77,13 @@ class ActoCritic(nn.Module):
             action_logits_vec: A tensor with the action logits, with shape [n_envs, n_actions].
         """
         x = torch.Tensor(x).to(self.device)
-        x, lstmState = self.lstm(x.unsqueeze(1), lstmState)
         x = x.squeeze(1)
         state_values = self.critic(x)  # shape: [n_envs,]
         action_logits_vec = self.actor(x)  # shape: [n_envs, n_actions]
-        return (state_values, action_logits_vec, lstmState)
+        return (state_values, action_logits_vec)
 
     def select_action(
-        self, x: np.ndarray, lstmState=None
+        self, x: np.ndarray
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns a tuple of the chosen actions and the log-probs of those actions.
@@ -102,14 +96,14 @@ class ActoCritic(nn.Module):
             action_log_probs: A tensor with the log-probs of the actions, with shape [n_steps_per_update, n_envs].
             state_values: A tensor with the state values, with shape [n_steps_per_update, n_envs].
         """
-        stateValues, action_logits, lstmState = self.forward(x, lstmState)
+        stateValues, action_logits = self.forward(x)
         action_pd = torch.distributions.Categorical(
             logits=action_logits
         )  # implicitly uses softmax
         actions = action_pd.sample()
         action_log_probs = action_pd.log_prob(actions)
         entropy = action_pd.entropy()
-        return (actions, action_log_probs, stateValues, entropy, lstmState)
+        return (actions, action_log_probs, stateValues, entropy)
 
     def get_losses(
         self,
@@ -174,8 +168,9 @@ class ActoCritic(nn.Module):
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Running RL Training on: {device.upper()}")
 
+#DI you want to train and create new weeights or use old weights
 saveWeights = True
-load_weights = False
+load_weights = True
 
 actor_weights_path = "weights/actor_weights.h5"
 critic_weights_path = "weights/critic_weights.h5"
@@ -196,6 +191,7 @@ dummy_heatmap_ManhattanMid = ManhattanDistanceFromMiddle(lowLeft=low, topRight=h
 dummy_Heatmap_Target_Dist = DistanceTarget(lowLeft=low,topRight=high, targetCords=target_coords)
 
 dummy_Heatmap_Target_Dist_Manhat = ManhattanDistanceTarget(lowLeft=low,topRight=high, targetCords=target_coords)
+
 '''lookU = lambda lowLeft, topRight, targetCords: DirectionWrap(
     ManhattanDistanceTarget(lowLeft=lowLeft, topRight=topRight, targetCords=targetCords), 
     offset=np.array([0, 1]))
@@ -218,12 +214,16 @@ def makeEnv():
     
     def _init():
         heatMapTypes = [
-            ManhattanDistanceTarget,
             DistanceTarget,
+            ManhattanDistanceTarget,       
             partial(DirectionWrap, inner_map_type=ManhattanDistanceTarget, offset=np.array([0,  1])),
             partial(DirectionWrap, inner_map_type=ManhattanDistanceTarget, offset=np.array([0, -1])),
             partial(DirectionWrap, inner_map_type=DistanceTarget,          offset=np.array([1,  0])),
             partial(DirectionWrap, inner_map_type=DistanceTarget,          offset=np.array([-1, 0])),
+            partial(DirectionWrap, inner_map_type=ManhattanDistanceTarget, offset=np.array([1,  1])),
+            partial(DirectionWrap, inner_map_type=ManhattanDistanceTarget, offset=np.array([-1, -1])),
+            partial(DirectionWrap, inner_map_type=DistanceTarget,          offset=np.array([0,  1])),
+            partial(DirectionWrap, inner_map_type=DistanceTarget,          offset=np.array([0, -1])),
 ]
         # Create your specific env
         env = MazeEnv(low, high, spawn, target_awards, target_coords, heatMapTypes=heatMapTypes, walls=walls)
@@ -240,7 +240,7 @@ actionShape = env.single_action_space.n
 #Defining core constants
 criticLr = 0.0001
 actorLr = 0.00005
-nUpdates = 5000
+nUpdates = 2500
 nStepsPerUpdate = 256
 
 gamma = 0.99
@@ -249,11 +249,10 @@ beginEntropy = 0.15
 endEntropy = 0.01
 entropyBonus = beginEntropy
 
-lstmState = None 
 
 if saveWeights:
 
-    agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, nEnvs, 256, 2)
+    agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, nEnvs)
 
     # Vector-specific wrapper
     envWrapper = gym.wrappers.vector.RecordEpisodeStatistics(env, buffer_length=10000)
@@ -294,8 +293,8 @@ if saveWeights:
         
         
         for step in range(nStepsPerUpdate):
-            actions, actionLogProbs, stateValuePreds, entropy, lstmState = agent.select_action(
-            states, lstmState)
+            actions, actionLogProbs, stateValuePreds, entropy= agent.select_action(
+            states)
             epEntropies[step] = entropy
             states, rewards, terminated, truncated, infos = envWrapper.step(
             actions.cpu().numpy())
@@ -304,19 +303,13 @@ if saveWeights:
             [term or trunc for term, trunc in zip(terminated, truncated)],
             dtype=torch.float32, device=device)
         
-            if lstmState is not None:
-                h, c = lstmState
-                # Zero out hidden state for finished envs
-                mask = (1 - dones).view(1, -1, 1)
-                lsmtState = (h * mask, c * mask)
-            
+        
             
             epValuePreds[step] = torch.squeeze(stateValuePreds)
             epRewards[step] = torch.tensor(rewards, device=device)
             epActionLogProbs[step] = actionLogProbs
             
-            if lstmState is not None:
-                lstmState = (lstmState[0].detach(), lstmState[1].detach())
+            
             
             masks[step] = torch.tensor([not (term or trunc) for term, trunc in zip(terminated, truncated)])
 
@@ -449,11 +442,7 @@ target_coords = np.array([[35, 40], [70,20]])
 target_awards = np.array([10, 5])
 evalHeatMapTypes = [
             ManhattanDistanceTarget,
-            DistanceTarget,
-            partial(DirectionWrap, inner_map_type=ManhattanDistanceTarget, offset=np.array([0,  1])),
-            partial(DirectionWrap, inner_map_type=ManhattanDistanceTarget, offset=np.array([0, -1])),
-            partial(DirectionWrap, inner_map_type=DistanceTarget,          offset=np.array([1,  0])),
-            partial(DirectionWrap, inner_map_type=DistanceTarget,          offset=np.array([-1, 0])),
+            DistanceTarget
 ]
 evalEnv = MazeEnv(low, high, spawn, target_awards, target_coords, 
                    heatMapTypes=evalHeatMapTypes)
@@ -467,20 +456,19 @@ obs, info = evalEnv.reset(options=resetOptions)
 done = False
 totalReward = 0
 
-lstmState = None
 
 
 with torch.no_grad(): # No training pytorch stuff
     while not done:
         # 1. Get the action (add a batch dimension with [None, :] for the network)
-        _, actionLogits, lstmState = agent.forward(obs[None, :], lstmState)
+        _, actionLogits = agent.forward(obs[None, :])
         
         # 2. Pick the BEST action (Argmax)
         action = torch.argmax(actionLogits, dim=-1).item()
         
         # 3. Step the environment
         obs, reward, terminated, truncated, info = evalEnv.step(action)
-        evalEnv.unwrapped.visualize(0)
+        evalEnv.unwrapped.visualize(1)
         print(evalEnv.unwrapped.coords)
         totalReward += reward
         done = terminated or truncated

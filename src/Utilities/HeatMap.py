@@ -102,6 +102,8 @@ class HeatMappable(Protocol):
         ...
     def generate_heatmap(self, noise=0, blockSize=1) -> np.ndarray:
         ...  
+    def toString(this) -> str:
+        ...
 
 class DistanceTarget():
     def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
@@ -119,6 +121,8 @@ class DistanceTarget():
             if d < min_dist:
                 min_dist = d
         return min_dist
+    def toString() -> str:
+        return "L_2Distance"
 
     def getRange(self) -> tuple[float, float]:
         corners = np.array(np.meshgrid(*zip(self.lowLeft, self.topRight))).T.reshape(-1, self.dimension)
@@ -172,6 +176,7 @@ class DijkstraDistanceTarget():
                             heapq.heappush(heap, (nd, nxi, nyi))
 
         return dist
+    
 
     def map(self, cordArr: NDArray[np.int_]) -> float:
         xi = int(cordArr[0] - self.lowLeft[0])
@@ -188,6 +193,9 @@ class DijkstraDistanceTarget():
 
     def generate_heatmap(self, noise=0, blockSize=1):
         return generate_heatmap_impl(self, noise, blockSize)
+    
+    def toString() -> str:
+        return "DijkstraDistance"
 
 class ManhattanDistanceTarget():
     def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
@@ -212,6 +220,9 @@ class ManhattanDistanceTarget():
     
     def generate_heatmap(self, noise=0, blockSize=1):
         return generate_heatmap_impl(self, noise, blockSize)
+    
+    def toString() -> str:
+        return "L_1Distance"
 
 class LInftyDistanceTarget():
     def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
@@ -230,6 +241,9 @@ class LInftyDistanceTarget():
     
     def generate_heatmap(self, noise=0, blockSize=1):
         return generate_heatmap_impl(self, noise, blockSize)
+    
+    def toString() -> str:
+        return "L_inftyDistance"
 
 class DistanceFromMiddle():
     def __init__(self,targetCords:NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
@@ -253,6 +267,8 @@ class DistanceFromMiddle():
     
     def generate_heatmap(self, noise=0, blockSize=1):
         return generate_heatmap_impl(self, noise, blockSize)
+    def toString() -> str:
+        return "L_2DistanceFromMid"
 
 class ManhattanDistanceFromMiddle():
     def __init__(self, lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
@@ -277,6 +293,9 @@ class ManhattanDistanceFromMiddle():
     
     def generate_heatmap(self, noise=0, blockSize=1):
         return generate_heatmap_impl(self, noise, blockSize)
+    
+    def toString() -> str:
+        return "L_1DistanceFromMiddle"
 
 class LInftyDistanceFromMiddle():
     def __init__(self, lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
@@ -300,6 +319,9 @@ class LInftyDistanceFromMiddle():
     def generate_heatmap(self, noise=0, blockSize=1):
         return generate_heatmap_impl(self, noise, blockSize)
     
+    def toString() -> str:
+        return "L_InftyDistanceFromMiddle"
+    
 class DirectionWrap(HeatMappable):
     def __init__(self, inner_map_type, offset, **kwargs):
          # Filter kwargs to only what inner_map_type accepts
@@ -314,6 +336,9 @@ class DirectionWrap(HeatMappable):
         return self.inner.map(coords + self.offset)
     def getRange(self):
         return self.inner.getRange()
+    
+    def toString(this) -> str:
+        return this.inner.toString + "WithOffsetOf(" + this.offset[0]+"," + this.offset[1]+")"
 class NoiseWrap:
     def __init__(self, targetMap: HeatMappable, noiseLevel: float = 0.05):
         """
@@ -338,8 +363,85 @@ class NoiseWrap:
             self.hash_table[key]=clean_value+noise
 
         return self.hash_table[key]
+    
+    def toString(this) -> str:
+        return this.inner.toString() + "WithNoiseOf"+this.noise_level
         
     def getRange(self) -> tuple[float, float]:
         # Return the range of the underlying map
         return self.target_map.getRange()
+    
+    
+    
+    
+    
+    
+    
+    
+
+#Heat maps used for testing and data collection
+
+class xAscending(HeatMappable):
+    def __init__(self, lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
+        self.lowLeft = lowLeft
+        self.topRight = topRight
+
+    def map(self, cordArr: NDArray[np.int_]) -> float:
+        return (cordArr-self.lowLeft)[0]
+
+
+    def getRange(self) -> tuple[float, float]:
+        return [0,(self.topRight-self.lowLeft)[0]]
+    
+    def toString(this) -> str:
+        return "xAscending"
+
+
+
+class yAscending(HeatMappable):
+    def __init__(self, lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
+        self.lowLeft = lowLeft
+        self.topRight = topRight
+
+    def map(self, cordArr: NDArray[np.int_]) -> float:
+        return (cordArr-self.lowLeft)[1]
+
+
+    def getRange(self) -> tuple[float, float]:
+        return [0,(self.topRight-self.lowLeft)[1]]
+    def toString(this) -> str:
+        return "yAscending"
+
+
+class xDescending(HeatMappable):
+    def __init__(self, lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
+        self.lowLeft = lowLeft
+        self.topRight = topRight
+
+    def map(self, cordArr: NDArray[np.int_]) -> float:
+        return (self.topRight-cordArr)[0]
+
+
+    def getRange(self) -> tuple[float, float]:
+        return [0,(self.topRight-self.lowLeft)[0]]
+    
+    def toString(this) -> str:
+        return "xDescending"
+
+
+
+class yDescending(HeatMappable):
+    def __init__(self, lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
+        self.lowLeft = lowLeft
+        self.topRight = topRight
+
+    def map(self, cordArr: NDArray[np.int_]) -> float:
+        return (self.topRight-cordArr)[1]
+
+
+    def getRange(self) -> tuple[float, float]:
+        return [0,(self.topRight-self.lowLeft)[1]]
+    
+    def toString(this) -> str:
+        return "yDescending"
     

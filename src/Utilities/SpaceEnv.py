@@ -38,7 +38,7 @@ class MazeEnv(gym.Env):
         self.maps = self.buildMaps()
         ##For when pure python is better than vectorized
         self.targetsTuple = set(map(tuple, self.targetCords.tolist()))
-        self.walls = generateWalls(num_cols=self.num_cols, num_rows=self.num_rows)
+        self.walls = np.zeros((self.num_cols,self.num_rows))
 
         if not (self.lowerLeft.shape == (2,) and 
                 self.upperRight.shape == (2,) and 
@@ -150,7 +150,7 @@ class MazeEnv(gym.Env):
             #TO stop walls from gettign in the way until they are fully impl
             #self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
 
-            self.walls = generateWalls(self.num_cols, self.num_rows, 2, 5, 0.4)
+            self.walls = np.zeros((self.num_cols,self.num_rows))
             #self.walls = np.zeros(self.num_cols,self.num_rows)
         
         if(randomSpawn or randomSize):
