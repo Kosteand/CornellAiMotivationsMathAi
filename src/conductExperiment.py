@@ -18,6 +18,80 @@ if(useProfiler):
     profiler = cProfile.Profile()
     profiler.enable()
 
+
+def mapLabel(m) -> str:
+    """Filesystem-safe label for a heatmap entry (class, partial, or instance).
+
+    The entries in a mapsTypes list are uninstantiated (classes / functools.partial),
+    so we can't call the instance-level toString(); derive a stable name instead.
+    """
+    if isinstance(m, partial):
+        parts = [getattr(m.func, "__name__", str(m.func))]
+        inner = m.keywords.get("inner_map_type")
+        if inner is None and m.args:
+            inner = m.args[0]
+        if inner is not None:
+            parts.append(mapLabel(inner))
+        noise = m.keywords.get("noiseLevel")
+        if noise is not None:
+            parts.append(f"n{int(round(noise * 100))}")
+        offset = m.keywords.get("offset")
+        if offset is not None:
+            parts.append(f"o{int(offset[0])}_{int(offset[1])}")
+        targetIndex = m.keywords.get("targetIndex")
+        if targetIndex is not None:
+            parts.append(f"t{int(targetIndex)}")
+        component = m.keywords.get("component")
+        if component is not None:
+            parts.append(f"c{int(component)}")
+        return "_".join(parts)
+    if isinstance(m, type):
+        ts = getattr(m, "toString", None)
+        if ts is not None:
+            try:
+                return ts()
+            except TypeError:
+                pass
+        return m.__name__
+    ts = getattr(m, "toString", None)
+    if ts is not None:
+        try:
+            return ts()
+        except Exception:
+            pass
+    return type(m).__name__
+
+
+# Noise std per sweep index, in normalized [0,1] heatmap units (because getObs now
+# divides each channel by its range). The per-step gradient of a distance field is
+# ~1/range ≈ 0.012 normalized, so NOISE_STEP=0.01 sweeps from clean (i=0) up to
+# ~0.09 std at i=9 — roughly 7x the single-step signal: hard but the static global
+# gradient still survives. Tune this one constant to make the task easier/harder.
+NOISE_STEP = 0.01
+
+
+def buildMapsTypes(i):
+    """Full heatmap-observation list for noise experiment index i (noise = NOISE_STEP*i).
+
+    Elements [0] and [1] are the two competing base proxies (L2 vs Manhattan,
+    both noised); the rest are direction-wrapped "look" sensors fed to the agent.
+    Noise is static (cached per cell in NoiseWrap) and held constant for the whole
+    training run at this level — no warmup/curriculum.
+    """
+    noise = NOISE_STEP * i
+    return [
+        partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=noise),
+        partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=noise),
+        partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=noise), offset=np.array([0,  1])),
+        partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=noise), offset=np.array([0, -1])),
+        partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=noise), offset=np.array([0,  1])),
+        partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=noise), offset=np.array([0, -1])),
+        partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=noise), offset=np.array([1,  0])),
+        partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=noise), offset=np.array([-1, 0])),
+        partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=noise), offset=np.array([1,  0])),
+        partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=noise), offset=np.array([-1, 0])),
+    ]
+
 class ActoCritic(nn.Module):
     def __init__(
         self,
@@ -185,17 +259,24 @@ target_coords = np.array([[35, 40], [70,20]])
 target_awards = np.array([10, 5])
 
 
-def makeEnv():
-    
-    def _init(mapTypes):
-        heatMapTypes = mapTypes
+def makeEnv(mapTypes):
+
+    def _init():
         # Create your specific env
-        env = MazeEnv(low, high, spawn, target_awards, target_coords, heatMapTypes=heatMapTypes, walls=walls)
+        env = MazeEnv(low, high, spawn, target_awards, target_coords, heatMapTypes=mapTypes, walls=walls)
         return env
     return _init
 
 
 def trainAgent(mapsTypes):
+    # Skip-if-done: resume a killed sweep at the next untrained noise level.
+    # A finished agent leaves weights tagged "UV" (just trained) which testValidity
+    # later renames to "pass"/"fail" — if any of those exist, this level is done.
+    label = mapLabel(mapsTypes[0]) + mapLabel(mapsTypes[1])
+    if any(os.path.isfile(f"weights/actor_weights{label}{suf}.h5") for suf in ("UV", "pass", "fail")):
+        print(f"Skipping already-trained agent: {label}")
+        return
+
     nEnvs = 22
 
     env = gym.vector.SyncVectorEnv([makeEnv(mapsTypes) for _ in range(nEnvs)])
@@ -206,13 +287,13 @@ def trainAgent(mapsTypes):
     #Defining core constants
     criticLr = 0.0001
     actorLr = 0.00005
-    nUpdates = 2500
+    nUpdates = 500
     nStepsPerUpdate = 256
 
     gamma = 0.99
     lam = 0.95
-    beginEntropy = 0.15
-    endEntropy = 0.01
+    beginEntropy = 0.05
+    endEntropy = 0.005
     entropyBonus = beginEntropy
 
 
@@ -237,7 +318,9 @@ def trainAgent(mapsTypes):
         
     
     for samplePhase in tqdm(range(nUpdates)):
-        entropyBonus = max(0.05,beginEntropy - (samplePhase*2 / nUpdates) * (beginEntropy - endEntropy))
+        # floor at endEntropy (was hard-coded 0.05, which overrode the anneal target
+        # and kept the entropy bonus high enough to swamp the sparse reward signal)
+        entropyBonus = max(endEntropy, beginEntropy - (samplePhase*2 / nUpdates) * (beginEntropy - endEntropy))
         if samplePhase % 100 == 0 and current_max_steps > min_steps:
             current_max_steps -= step_decay
 
@@ -375,15 +458,15 @@ def trainAgent(mapsTypes):
 
     plt.tight_layout()
     plt.show()
-    plt.savefig("result1"+ mapsTypes[0].toString()+mapsTypes[1].toString())##todo
+    plt.savefig("result1"+ mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1]))##todo
 
 
 
 
     if not os.path.exists("weights"):
         os.mkdir("weights")
-    actor_weights_path = "weights/actor_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5"
-    critic_weights_path = "weights/critic_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5"
+    actor_weights_path = "weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5"
+    critic_weights_path = "weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5"
     """ save network weights """
     torch.save(agent.actor.state_dict(), actor_weights_path)
     torch.save(agent.critic.state_dict(), critic_weights_path)
@@ -408,8 +491,8 @@ def testValidity(mapsTypes):
     
     agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, n_envs=1)
     
-    actor_weights_path = "weights/actor_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5"
-    critic_weights_path = "weights/critic_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5"
+    actor_weights_path = "weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5"
+    critic_weights_path = "weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5"
 
     agent.actor.load_state_dict(torch.load(actor_weights_path))
     agent.critic.load_state_dict(torch.load(critic_weights_path))
@@ -454,13 +537,13 @@ def testValidity(mapsTypes):
             done = terminated or truncated
             if(done):
                 if(terminated):
-                    print(mapsTypes[0].toString()+mapsTypes[1].toString()+"pass")
-                    os.rename("weights/actor_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5","weights/actor_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"pass"+".h5")
-                    os.rename("weights/critic_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5","weights/critic_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"pass"+".h5")
+                    print(mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"pass")
+                    os.rename("weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5","weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"pass"+".h5")
+                    os.rename("weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5","weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"pass"+".h5")
                 else:
-                    print(mapsTypes[0].toString()+mapsTypes[1].toString()+"fail")
-                    os.rename("weights/critic_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5","weights/critic_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"fail"+".h5")
-                    os.rename("weights/actor_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5","weights/actor_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"fail"+".h5")
+                    print(mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"fail")
+                    os.rename("weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5","weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"fail"+".h5")
+                    os.rename("weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5","weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"fail"+".h5")
 
 
     print(f"Final Score: {totalReward}")
@@ -469,81 +552,6 @@ def testValidity(mapsTypes):
     
     
     
-def testValidity(mapsTypes):
-    """ load network weights """
-    
-    nEnvs = 22
-
-    env = gym.vector.SyncVectorEnv([makeEnv(mapsTypes) for _ in range(nEnvs)])
-
-    obsShape = env.single_observation_space.shape[0]
-    actionShape = env.single_action_space.n
-
-    #Defining core constants
-    criticLr = 0.0001
-    actorLr = 0.00005
-
-
-    
-    agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, n_envs=1)
-    
-    actor_weights_path = "weights/actor_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5"
-    critic_weights_path = "weights/critic_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5"
-
-    agent.actor.load_state_dict(torch.load(actor_weights_path))
-    agent.critic.load_state_dict(torch.load(critic_weights_path))
-    agent.actor.eval()
-    agent.critic.eval()
-    agent.critic.eval()
-    agent.actor.eval()        # Create your specific env
-            
-    low = np.array([0, 0])
-    high = np.array([100, 100])
-
-    spawn = np.array([5, 5])
-    target_coords = np.array([[55, 43], [80,20]])
-    target_awards = np.array([10, 5])
-    evalEnv = MazeEnv(low, high, spawn, target_awards, target_coords, 
-                    mapsTypes)
-    resetOptions = {
-        "randomSpawn": True,
-        "randomSize": True, 
-        "randomTargetCoords": True,
-        "max_steps": 1000
-    }
-    obs, info = evalEnv.reset(options=resetOptions)
-    done = False
-    totalReward = 0
-
-
-
-    with torch.no_grad(): # No training pytorch stuff
-        while not done:
-            # 1. Get the action (add a batch dimension with [None, :] for the network)
-            _, actionLogits = agent.forward(obs[None, :])
-            
-            # 2. Pick the BEST action (Argmax)
-            action = torch.argmax(actionLogits, dim=-1).item()
-            
-            # 3. Step the environment
-            obs, reward, terminated, truncated, info = evalEnv.step(action)
-            evalEnv.unwrapped.visualize(1)
-            print(evalEnv.unwrapped.coords)
-            totalReward += reward
-            done = terminated or truncated
-            if(done):
-                if(terminated):
-                    print(mapsTypes[0].toString()+mapsTypes[1].toString()+"pass")
-                    os.rename("weights/actor_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5","weights/actor_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"pass"+".h5")
-                    os.rename("weights/critic_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5","weights/critic_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"pass"+".h5")
-                else:
-                    print(mapsTypes[0].toString()+mapsTypes[1].toString()+"fail")
-                    os.rename("weights/critic_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5","weights/critic_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"fail"+".h5")
-                    os.rename("weights/actor_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"UV"+".h5","weights/actor_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"fail"+".h5")
-
-
-    print(f"Final Score: {totalReward}")
-    evalEnv.close()
 def testBinaryMapStrength(mapsTypes):
     
     criticLr = 0.0001
@@ -572,8 +580,8 @@ def testBinaryMapStrength(mapsTypes):
 
 
     agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, n_envs=1)
-    actor_weights_path = "weights/actor_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"pass"+".h5"
-    critic_weights_path = "weights/critic_weights"+mapsTypes[0].toString()+mapsTypes[1].toString()+"pass"+".h5"
+    actor_weights_path = "weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"pass"+".h5"
+    critic_weights_path = "weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"pass"+".h5"
     if not(os.path.isfile(actor_weights_path)):
         print("EIther agent not failed or not validated")
     else:
@@ -614,45 +622,33 @@ def testBinaryMapStrength(mapsTypes):
                 totalReward += reward
 
         if(coords<0):
-            print(mapsTypes[0]+"is stronger than"+mapsTypes[1]+"by"+coords*-1)
+            print(f"{mapLabel(mapsTypes[0])} is stronger than {mapLabel(mapsTypes[1])} by {coords*-1}")
         else:
-            print(mapsTypes[0]+"is stronger than"+mapsTypes[1]+"by"+coords)
+            print(f"{mapLabel(mapsTypes[0])} is stronger than {mapLabel(mapsTypes[1])} by {coords}")
         evalEnv.close()
 
-for i in range(10):
-    trainAgent([partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i),
-    partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i)],            DistanceTarget,     
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i), offset=np.array([0,  1])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i), offset=np.array([0, -1])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i),          offset=np.array([0,  1])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i),          offset=np.array([0, -1])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i), offset=np.array([1,  0])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i), offset=np.array([-1, 0])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i),          offset=np.array([1,  0])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i),          offset=np.array([-1, 0])),)
-    
-for i in range(10):
-    testValidity([partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i),
-    partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i)],            DistanceTarget,     
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i), offset=np.array([0,  1])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i), offset=np.array([0, -1])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i),          offset=np.array([0,  1])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i),          offset=np.array([0, -1])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i), offset=np.array([1,  0])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i), offset=np.array([-1, 0])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i),          offset=np.array([1,  0])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i),          offset=np.array([-1, 0])),)
-for i in range(10):
-    testBinaryMapStrength([partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i),
-    partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i)],            DistanceTarget,     
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i), offset=np.array([0,  1])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i), offset=np.array([0, -1])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i),          offset=np.array([0,  1])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i),          offset=np.array([0, -1])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i), offset=np.array([1,  0])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=DistanceTarget, noiseLevel=0.05*i), offset=np.array([-1, 0])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i),          offset=np.array([1,  0])),
-            partial(DirectionWrap, inner_map_type=partial(NoiseWrap, inner_map_type=ManhattanDistanceTarget, noiseLevel=0.05*i),          offset=np.array([-1, 0])),)
+# --- Sanity check: train ONCE on the new OptimalActionTarget heatmap, NO noise ---
+# Channels [0]/[1] are the two single-target-locked variants (needed for weight
+# naming); [2] is the nearest-target version. The agent is handed the optimal
+# action directly, so it should learn fast — this just confirms the new map and
+# TargetWrap integrate end-to-end.
+sanityMaps = [
+    partial(TargetWrap, inner_map_type=OptimalActionTarget, targetIndex=0),
+    partial(TargetWrap, inner_map_type=OptimalActionTarget, targetIndex=1),
+    OptimalActionTarget,
+]
+trainAgent(sanityMaps)
+
+testValidity(sanityMaps)
+# --- Original noise sweep (re-enable when the sanity run looks good) ---
+# for i in range(10):
+#     trainAgent(buildMapsTypes(i))
+# for i in range(10):
+#     testValidity(buildMapsTypes(i))
+# for i in range(10):
+#     testBinaryMapStrength(buildMapsTypes(i))
+
+
 
 
 '''[

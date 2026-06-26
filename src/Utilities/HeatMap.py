@@ -1,4 +1,5 @@
 import inspect
+from functools import partial
 
 import numpy as np
 import random
@@ -245,6 +246,254 @@ class LInftyDistanceTarget():
     def toString() -> str:
         return "L_inftyDistance"
 
+class OptimalActionTarget():
+    """Returns the optimal action (0-3) for greedily reaching the nearest target.
+
+    Action encoding matches SpaceEnv.step:
+        0 = +Y (up), 1 = -Y (down), 2 = +X (right), 3 = -X (left).
+    At each cell it picks the nearest target (L2) and returns the action whose
+    one-step move most reduces the L2 distance to that target.
+
+    To make it point at exactly one target instead of "nearest of all", wrap it
+    with TargetWrap (which restricts targetCords to a single chosen index).
+    """
+    # one-step coordinate delta per action index (see SpaceEnv.step)
+    _ACTION_DELTAS = ((0, 1), (0, -1), (1, 0), (-1, 0))
+
+    def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
+        self.targetCords = np.array(targetCords)
+        self.lowLeft = lowLeft
+        self.topRight = topRight
+        self.dimension = self.targetCords.shape[-1]
+
+    def map(self, cordArr: NDArray[np.int_]) -> float:
+        x, y = int(cordArr[0]), int(cordArr[1])
+        # nearest target by squared L2
+        diffs = self.targetCords - np.array([x, y])
+        tx, ty = self.targetCords[int(np.argmin(np.sum(diffs * diffs, axis=1)))]
+        # action whose resulting cell is closest to that target
+        best_a, best_d = 0, float('inf')
+        for a, (dx, dy) in enumerate(self._ACTION_DELTAS):
+            ex, ey = int(tx) - (x + dx), int(ty) - (y + dy)
+            d = ex * ex + ey * ey
+            if d < best_d:
+                best_d, best_a = d, a
+        return float(best_a)
+
+    def getRange(self) -> tuple[float, float]:
+        # categorical action id in [0, 3]
+        return (0.0, 3.0)
+
+    @staticmethod
+    def toString() -> str:
+        return "OptimalAction"
+
+    def generate_heatmap(self, noise=0, blockSize=1):
+        return generate_heatmap_impl(self, noise, blockSize)
+
+class LinearActionTarget():
+    """Two-channel FLOAT encoding of the optimal action that requires the agent to
+    LINEARLY COMBINE both channels to decode it (no trivial 4-value lookup).
+
+    Each channel uses the SAME equation:   value = coeff * a + carrier
+      - a       : optimal action toward the nearest target (0-3), as in OptimalActionTarget
+      - carrier : continuous L2 distance to the nearest target (identical for both channels)
+      - coeff   : 1 for component 0, 2 for component 1
+
+    Because the carrier is continuous and shared, it cancels under subtraction:
+        a == channel1 - channel0   (exact)
+    yet neither channel alone reveals a (it's buried under an unknown continuous
+    offset), so a single channel is NOT a trivial 4-valued observation. After
+    getObs normalization the channels are scaled differently, but a fixed
+    affine/linear combination still recovers a exactly (linear stays linear).
+
+    Use two instances as two observation channels, e.g.:
+        partial(LinearActionTarget, component=0)
+        partial(LinearActionTarget, component=1)
+    """
+    _ACTION_DELTAS = ((0, 1), (0, -1), (1, 0), (-1, 0))
+    _COEFFS = (1.0, 2.0)
+
+    def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_], component: int = 0, **kwargs):
+        # **kwargs swallows extra env context (spawn, targetAwards) that buildMaps
+        # passes to partials unfiltered — required since this is used via partial(component=...).
+        self.targetCords = np.array(targetCords)
+        self.lowLeft = lowLeft
+        self.topRight = topRight
+        self.dimension = self.targetCords.shape[-1]
+        self.component = int(component)
+
+    def _nearest(self, x, y):
+        diffs = self.targetCords - np.array([x, y])
+        return self.targetCords[int(np.argmin(np.sum(diffs * diffs, axis=1)))]
+
+    def map(self, cordArr: NDArray[np.int_]) -> float:
+        x, y = int(cordArr[0]), int(cordArr[1])
+        tx, ty = (int(v) for v in self._nearest(x, y))
+        # optimal action: the move that most reduces L2 distance to that target
+        best_a, best_d = 0, float('inf')
+        for a, (dx, dy) in enumerate(self._ACTION_DELTAS):
+            ex, ey = tx - (x + dx), ty - (y + dy)
+            d = ex * ex + ey * ey
+            if d < best_d:
+                best_d, best_a = d, a
+        carrier = ((tx - x) ** 2 + (ty - y) ** 2) ** 0.5  # continuous, shared across components
+        return self._COEFFS[self.component] * best_a + carrier
+
+    def getRange(self) -> tuple[float, float]:
+        corners = np.array(np.meshgrid(*zip(self.lowLeft, self.topRight))).T.reshape(-1, self.dimension)
+        maxDist = max(np.min(np.linalg.norm(self.targetCords - c, axis=1)) for c in corners)
+        return (0.0, float(self._COEFFS[self.component] * 3 + maxDist))
+
+    def toString(self) -> str:
+        return "LinearAction" + str(self.component)
+
+    def generate_heatmap(self, noise=0, blockSize=1):
+        return generate_heatmap_impl(self, noise, blockSize)
+
+class QuadraticActionTarget():
+    """Two-channel FLOAT encoding where the optimal action is recoverable ONLY by a
+    QUADRATIC combination of the channels — an affine decode provably cannot work.
+
+    The continuous carrier enters one channel SQUARED:
+        component 0:  h0 = carrier
+        component 1:  h1 = a + carrier**2
+    so the exact decode is   a = h1 - h0**2   (degree 2; needs the square term).
+    No affine map alpha*h0 + beta*h1 + gamma equals a for all cells: to cancel the
+    carrier you must subtract h0**2, which affine functions can't produce. Yet each
+    channel alone is a continuous float that doesn't reveal a (contrast
+    LinearActionTarget, whose decode a = h1 - h0 IS affine).
+
+    carrier = L2 distance to the nearest target, normalized to [0,1] by a
+    precomputed max distance so channel magnitudes stay small and float-precise.
+
+    Use two instances (component=0, component=1) as two observation channels.
+    """
+    _ACTION_DELTAS = ((0, 1), (0, -1), (1, 0), (-1, 0))
+
+    def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_], component: int = 0, **kwargs):
+        self.targetCords = np.array(targetCords)
+        self.lowLeft = lowLeft
+        self.topRight = topRight
+        self.dimension = self.targetCords.shape[-1]
+        self.component = int(component)
+        corners = np.array(np.meshgrid(*zip(lowLeft, topRight))).T.reshape(-1, self.dimension)
+        self._maxDist = float(max(np.min(np.linalg.norm(self.targetCords - c, axis=1)) for c in corners)) or 1.0
+
+    def _nearest(self, x, y):
+        diffs = self.targetCords - np.array([x, y])
+        return self.targetCords[int(np.argmin(np.sum(diffs * diffs, axis=1)))]
+
+    def map(self, cordArr: NDArray[np.int_]) -> float:
+        x, y = int(cordArr[0]), int(cordArr[1])
+        tx, ty = (int(v) for v in self._nearest(x, y))
+        best_a, best_d = 0, float('inf')
+        for a, (dx, dy) in enumerate(self._ACTION_DELTAS):
+            ex, ey = tx - (x + dx), ty - (y + dy)
+            d = ex * ex + ey * ey
+            if d < best_d:
+                best_d, best_a = d, a
+        carrier = (((tx - x) ** 2 + (ty - y) ** 2) ** 0.5) / self._maxDist  # normalized [0,1]
+        if self.component == 0:
+            return float(carrier)
+        return float(best_a + carrier * carrier)
+
+    def getRange(self) -> tuple[float, float]:
+        return (0.0, 1.0) if self.component == 0 else (0.0, 4.0)
+
+    def toString(self) -> str:
+        return "QuadraticAction" + str(self.component)
+
+    def generate_heatmap(self, noise=0, blockSize=1):
+        return generate_heatmap_impl(self, noise, blockSize)
+
+class PolynomialActionTarget():
+    """Two-channel encoding decoded by a CONFIGURABLE bivariate polynomial.
+
+    You choose two single-variable polynomials A and B (as coefficient lists,
+    constant-term first). The decode is:
+
+        a = A(h0) * h1 + B(h0)
+
+    and the channels are generated by solving that for h1:
+
+        h0 = carrier                       (continuous, normalized distance in [0,1])
+        h1 = (a - B(carrier)) / A(carrier)
+
+    so the decode holds exactly for ANY A, B. This is the general cleanly
+    -generatable bivariate-polynomial decode: linear in h1 (generation is one
+    division, no root-solving), arbitrary polynomial in h0 (any degree, and a
+    cross term h0*h1 whenever A has a non-constant term).
+
+    Examples (a_coeffs, b_coeffs)  [carrier normalized to [0,1], unlike the raw
+    distance in LinearActionTarget/QuadraticActionTarget, so values differ but the
+    decode form matches]:
+        ([1],    [0, -1])     -> a = h1 - h0      (same decode as LinearActionTarget)
+        ([1],    [0, 0, -1])  -> a = h1 - h0**2   (same decode as QuadraticActionTarget)
+        ([1, 1], [0])         -> a = (1 + h0)*h1  (cross term h0*h1)
+        ([1],    [0,0,0,-1])  -> a = h1 - h0**3   (cubic)
+
+    Constraint: A(carrier) must be nonzero for all carrier in [0,1] (it's a
+    denominator) — keep a nonzero constant term in a_coeffs. Enforced in __init__.
+
+    Use two instances (component=0, component=1) with the SAME a_coeffs/b_coeffs.
+    """
+    _ACTION_DELTAS = ((0, 1), (0, -1), (1, 0), (-1, 0))
+
+    def __init__(self, targetCords: NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_],
+                 component: int = 0, a_coeffs=(1.0,), b_coeffs=(0.0, -1.0), **kwargs):
+        self.targetCords = np.array(targetCords)
+        self.lowLeft = lowLeft
+        self.topRight = topRight
+        self.dimension = self.targetCords.shape[-1]
+        self.component = int(component)
+        self.a_coeffs = tuple(float(c) for c in a_coeffs)
+        self.b_coeffs = tuple(float(c) for c in b_coeffs)
+
+        corners = np.array(np.meshgrid(*zip(lowLeft, topRight))).T.reshape(-1, self.dimension)
+        self._maxDist = float(max(np.min(np.linalg.norm(self.targetCords - c, axis=1)) for c in corners)) or 1.0
+
+        # A(carrier) is a denominator -> must never vanish on carrier in [0,1].
+        grid = np.linspace(0.0, 1.0, 128)
+        if np.min(np.abs([self._poly(self.a_coeffs, g) for g in grid])) < 1e-6:
+            raise ValueError("PolynomialActionTarget: A(carrier) hits ~0 on [0,1]; "
+                             "give a_coeffs a nonzero constant term.")
+        # Precompute component-1 value range for getObs normalization.
+        h1 = [(a - self._poly(self.b_coeffs, g)) / self._poly(self.a_coeffs, g)
+              for a in range(4) for g in grid]
+        self._h1_range = (float(min(h1)), float(max(h1)))
+
+    @staticmethod
+    def _poly(coeffs, x):
+        return sum(c * (x ** k) for k, c in enumerate(coeffs))
+
+    def _nearest(self, x, y):
+        diffs = self.targetCords - np.array([x, y])
+        return self.targetCords[int(np.argmin(np.sum(diffs * diffs, axis=1)))]
+
+    def map(self, cordArr: NDArray[np.int_]) -> float:
+        x, y = int(cordArr[0]), int(cordArr[1])
+        tx, ty = (int(v) for v in self._nearest(x, y))
+        carrier = (((tx - x) ** 2 + (ty - y) ** 2) ** 0.5) / self._maxDist  # in [0,1]
+        if self.component == 0:
+            return float(carrier)
+        best_a, best_d = 0, float('inf')
+        for a, (dx, dy) in enumerate(self._ACTION_DELTAS):
+            ex, ey = tx - (x + dx), ty - (y + dy)
+            d = ex * ex + ey * ey
+            if d < best_d:
+                best_d, best_a = d, a
+        return float((best_a - self._poly(self.b_coeffs, carrier)) / self._poly(self.a_coeffs, carrier))
+
+    def getRange(self) -> tuple[float, float]:
+        return (0.0, 1.0) if self.component == 0 else self._h1_range
+
+    def toString(self) -> str:
+        return "PolyAction" + str(self.component)
+
+    def generate_heatmap(self, noise=0, blockSize=1):
+        return generate_heatmap_impl(self, noise, blockSize)
+
 class DistanceFromMiddle():
     def __init__(self,targetCords:NDArray[np.int_], lowLeft: NDArray[np.int_], topRight: NDArray[np.int_]):
         if not (lowLeft.size == topRight.size):
@@ -324,8 +573,9 @@ class LInftyDistanceFromMiddle():
     
 class DirectionWrap(HeatMappable):
     def __init__(self, inner_map_type, offset, **kwargs):
-         # Filter kwargs to only what inner_map_type accepts
-        inner_sig = inspect.signature(inner_map_type.__init__)
+         # Filter kwargs to only what inner_map_type accepts.
+         # Use signature(inner_map_type) (not .__init__) so partials work too.
+        inner_sig = inspect.signature(inner_map_type)
         if any(p.kind == p.VAR_KEYWORD for p in inner_sig.parameters.values()):
             filtered = kwargs
         else:
@@ -336,48 +586,97 @@ class DirectionWrap(HeatMappable):
         return self.inner.map(coords + self.offset)
     def getRange(self):
         return self.inner.getRange()
-    
+
     def toString(this) -> str:
-        return this.inner.toString + "WithOffsetOf(" + this.offset[0]+"," + this.offset[1]+")"
-class NoiseWrap:
-    def __init__(self, targetMap: HeatMappable, noiseLevel: float = 0.05):
+        return this.inner.toString() + "WithOffsetOf(" + str(this.offset[0]) + "," + str(this.offset[1]) + ")"
+class NoiseWrap(HeatMappable):
+    def __init__(self, inner_map_type=None, noiseLevel: float = 0.05, targetMap=None, **kwargs):
         """
-        target_map: The original HeatMap object.
-        noise_level: The amount of noise to add.
+        Wrap a heatmap with additive Gaussian noise.
+
+        Two construction styles are supported:
+          - new (used by SpaceEnv): inner_map_type is a HeatMap class/partial and
+            the inner map is built from filtered env kwargs (mirrors DirectionWrap).
+          - legacy: targetMap is an already-built HeatMap instance.
         """
-        self.target_map = targetMap
+        source = targetMap if targetMap is not None else inner_map_type
+        if source is None:
+            raise TypeError("NoiseWrap requires inner_map_type or targetMap")
+
+        if isinstance(source, (type, partial)):
+            # Build the inner map, filtering kwargs to what it accepts (partials supported).
+            inner_sig = inspect.signature(source)
+            if any(p.kind == p.VAR_KEYWORD for p in inner_sig.parameters.values()):
+                filtered = kwargs
+            else:
+                filtered = {k: v for k, v in kwargs.items() if k in inner_sig.parameters}
+            self.inner = source(**filtered)
+        else:
+            # Already an instance.
+            self.inner = source
         self.noise_level = noiseLevel
         self.hash_table = dict()
-        
+
     def map(self, cordArr: NDArray[np.int_]) -> float:
         # 1. Get the "clean" value from the original map
-        clean_value = self.target_map.map(cordArr)
+        clean_value = self.inner.map(cordArr)
         key = tuple(cordArr)
-        
+
         #check if value has alread been computed
-        if key not in self.hash_table: 
+        if key not in self.hash_table:
             low, high = self.getRange()
             scale = (high - low) * self.noise_level
             noise = np.random.normal(0, scale)
-            print("temp")
-            self.hash_table[key]=clean_value+noise
+            self.hash_table[key] = clean_value + noise
 
         return self.hash_table[key]
-    
+
     def toString(this) -> str:
-        return this.inner.toString() + "WithNoiseOf"+this.noise_level
-        
+        return this.inner.toString() + "WithNoiseOf" + str(this.noise_level)
+
     def getRange(self) -> tuple[float, float]:
         # Return the range of the underlying map
-        return self.target_map.getRange()
-    
-    
-    
-    
-    
-    
-    
-    
+        return self.inner.getRange()
+
+
+class TargetWrap(HeatMappable):
+    """Restricts an inner heatmap to a single target (by index).
+
+    The env passes the full targetCords; this wrapper slices it down to one
+    target before building the inner map, so e.g. OptimalActionTarget points at
+    exactly that target instead of the nearest of all. Composes with the other
+    wrappers (DirectionWrap, NoiseWrap) since it builds its inner the same way.
+    """
+    def __init__(self, inner_map_type, targetIndex=0, **kwargs):
+        kwargs = dict(kwargs)
+        if "targetCords" in kwargs and kwargs["targetCords"] is not None:
+            tc = np.array(kwargs["targetCords"])
+            self.targetIndex = int(targetIndex) % len(tc)
+            kwargs["targetCords"] = tc[[self.targetIndex]]
+        else:
+            self.targetIndex = int(targetIndex)
+        # Filter kwargs to what the inner accepts (partials supported), like DirectionWrap.
+        inner_sig = inspect.signature(inner_map_type)
+        if any(p.kind == p.VAR_KEYWORD for p in inner_sig.parameters.values()):
+            filtered = kwargs
+        else:
+            filtered = {k: v for k, v in kwargs.items() if k in inner_sig.parameters}
+        self.inner = inner_map_type(**filtered)
+
+    def map(self, coords):
+        return self.inner.map(coords)
+
+    def getRange(self):
+        return self.inner.getRange()
+
+    def toString(this) -> str:
+        # Base heatmaps define toString() without self, wrappers define it with;
+        # try the instance call, fall back to the class-level call.
+        try:
+            label = this.inner.toString()
+        except TypeError:
+            label = type(this.inner).toString()
+        return label + "Target" + str(this.targetIndex)
 
 #Heat maps used for testing and data collection
 

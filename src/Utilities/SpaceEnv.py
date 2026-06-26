@@ -117,6 +117,17 @@ class MazeEnv(gym.Env):
                 sig = inspect.signature(mapType)
                 kwargs = {k: v for k, v in env_context.items() if k in sig.parameters}
                 maps.append(mapType(**kwargs))
+
+        # Cache each map's normalization range once. getRange() is expensive
+        # (rebuilds a meshgrid + linalg.norm), so we must not call it per-step in
+        # getObs. These ranges are constant until maps are rebuilt (next reset).
+        self._mapNormLow = np.empty(len(maps), dtype=np.float32)
+        self._mapNormSpan = np.empty(len(maps), dtype=np.float32)
+        for i, m in enumerate(maps):
+            low, high = m.getRange()
+            span = high - low
+            self._mapNormLow[i] = low
+            self._mapNormSpan[i] = span if span > 0 else 1.0
         return maps
     
     def reset(self, seed=None, options=None):
@@ -216,7 +227,12 @@ class MazeEnv(gym.Env):
         distD, typeD = self._scan_direction(0, -1)
         distR, typeR = self._scan_direction(1, 0)
         distL, typeL = self._scan_direction(-1, 0)
-        extras = np.array([m.map(self.coords) for m in self.maps], dtype=np.float32)
+        # Normalize every heatmap channel to ~[0,1] using its own value range (cached
+        # in buildMaps), so all channels share a scale with the normalized distance
+        # inputs. NoiseWrap scales its noise to that same range, so after this division
+        # the noise std equals the configured noiseLevel directly (normalized units).
+        raw = np.array([m.map(self.coords) for m in self.maps], dtype=np.float32)
+        extras = (raw - self._mapNormLow) / self._mapNormSpan
         return np.array([
             distU/self.num_rows, distD/self.num_rows,
             distR/self.num_cols, distL/self.num_cols,

@@ -9,13 +9,13 @@ services:
     tty: true 
     stdin_open: true
     # GPU Support (NVIDIA)
-    #deploy:
-     # resources:
-      #  reservations:
-       #   devices:
-       #     - driver: nvidia
-       #       count: all
-        #      capabilities: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     # Environment variables for Python
     environment:
       - PYTHONUNBUFFERED=1
