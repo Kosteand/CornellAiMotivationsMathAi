@@ -5,11 +5,14 @@ import numpy as np
 from gymnasium import spaces
 from openpyxl import Workbook 
 from Utilities.HeatMap import DistanceTarget, HeatMappable, LInftyDistanceTarget, ManhattanDistanceTarget
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy.typing as npt
 from datetime import datetime
 from functools import partial
 from Utilities.generateWalls import generateWalls
+from Utilities.generateWalls import generateWallsFixed1
 
 
 class MazeEnv(gym.Env):
@@ -20,9 +23,9 @@ class MazeEnv(gym.Env):
     #targetAwards: List of the awards of each 
     #*args: List of heatMaps (probably from HeatMap.py)
     def __init__(self,lowerLeft: npt.NDArray[np.int_], upperRight: npt.NDArray[np.int_], 
-                 spawn: npt.NDArray[np.int_],targetAwards: npt.NDArray[np.int_],
-                 targetCords : npt.NDArray[np.int_], heatMapTypes:list,
-                 walls: np.ndarray | None = None):
+                    spawn: npt.NDArray[np.int_],targetAwards: npt.NDArray[np.int_],
+                    targetCords : npt.NDArray[np.int_], heatMapTypes:list = [],
+                    walls: np.ndarray | None = None, vision_range: int = 0, use_ray_scans: bool = True):
         super(MazeEnv, self).__init__()
         self.heatMapTypes = heatMapTypes
         self.max_steps = 1000  # Default starting limit decays
@@ -36,9 +39,9 @@ class MazeEnv(gym.Env):
         self.num_cols = self.upperRight[0] - self.lowerLeft[0] + 1
         self.num_rows = self.upperRight[1] - self.lowerLeft[1] + 1
         self.maps = self.buildMaps()
+        self.last_action = 0  # default to action 0 before any step is taken
         ##For when pure python is better than vectorized
         self.targetsTuple = set(map(tuple, self.targetCords.tolist()))
-        self.walls = generateWalls(num_cols=self.num_cols, num_rows=self.num_rows)
 
         if not (self.lowerLeft.shape == (2,) and 
                 self.upperRight.shape == (2,) and 
@@ -69,7 +72,8 @@ class MazeEnv(gym.Env):
                   raise ValueError(f"Target {coord} cannot be on a wall")
           self.walls = walls
         else:
-          self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
+          self.walls = generateWallsFixed1()
+          #self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool) !!!!!
           
           
           
@@ -77,8 +81,15 @@ class MazeEnv(gym.Env):
     
     #Size of distance obervation space is now fixed because of issues with using same weights for diff map sizes
     #TODO fix to a maxDim-shouldl be easy
-        obs_size = 8 + len(heatMapTypes)  # 4 dists + 4 types + extras
+        self.vision_range = vision_range
+        self.use_ray_scans = use_ray_scans
+        vision_size = (2 * vision_range + 1) ** 2 if vision_range > 0 else 0
+        ray_size = 8 if use_ray_scans else 0
+        obs_size = ray_size + len(heatMapTypes) + vision_size + 4
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32)
+
+        self.tile_map = self._build_tile_map()
+        self.vision_cache = self._precompute_vision() if self.vision_range > 0 else None
         
         
 
@@ -119,6 +130,36 @@ class MazeEnv(gym.Env):
                 maps.append(mapType(**kwargs))
         return maps
     
+    def _build_tile_map(self):
+        tile_map = np.zeros((self.num_cols, self.num_rows), dtype=np.float32)
+        # walls
+        tile_map[self.walls] = 1.0
+        # targets
+        for tx, ty in self.targetCords:
+            xi = int(tx - self.lowerLeft[0])
+            yi = int(ty - self.lowerLeft[1])
+            tile_map[xi, yi] = 2.0
+        return tile_map
+
+    def _precompute_vision(self):
+      v = 2 * self.vision_range + 1
+      vision_size = v * v
+      cache = np.zeros((self.num_cols, self.num_rows, vision_size), dtype=np.float32)
+      
+      # Pad tile_map with 1.0 (walls) for out-of-bounds regions
+      pad = self.vision_range
+      padded = np.pad(self.tile_map, pad, mode='constant', constant_values=1.0)
+      
+      for xi in range(self.num_cols):
+          for yi in range(self.num_rows):
+              # Extract the vision window directly from the padded map
+              window = padded[xi:xi+v, yi:yi+v]
+              cache[xi, yi] = window.flatten()
+      
+      return cache
+      
+
+
     def reset(self, seed=None, options=None):
         # Gymnasium reset must handle seeds and return (obs, info)
         opts = options if options is not None else {}
@@ -135,6 +176,7 @@ class MazeEnv(gym.Env):
         self.max_steps = opts.get("max_steps", self.max_steps)
         super().reset(seed=seed)
         self.current_step = 0
+        self.last_action = 0
         if(randomSize):
             random_x = self.np_random.integers(-20, 20)
             random_y = self.np_random.integers(-20, 20)
@@ -147,11 +189,11 @@ class MazeEnv(gym.Env):
             self.upperRight = self.lowerLeft+[random_x_size,random_y_size]
             self.num_cols = self.upperRight[0] - self.lowerLeft[0] + 1
             self.num_rows = self.upperRight[1] - self.lowerLeft[1] + 1
-            #TO stop walls from gettign in the way until they are fully impl
-            #self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
+        #TO stop walls from gettign in the way until they are fully impl
+        #self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
 
-            self.walls = generateWalls(self.num_cols, self.num_rows, 2, 5, 0.4)
-            #self.walls = np.zeros(self.num_cols,self.num_rows)
+        self.walls = generateWallsFixed1()
+        #self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool) !!!!!
         
         if(randomSpawn or randomSize):
             foundValidSpawn = False
@@ -183,6 +225,8 @@ class MazeEnv(gym.Env):
                       break
           self.targetCords = np.array(new_targets)
         self.targetsTuple = set(map(tuple, self.targetCords.tolist()))
+        self.tile_map = self._build_tile_map()
+        self.vision_cache = self._precompute_vision() if self.vision_range > 0 else None
 
         self.maps = self.buildMaps()
         observation = self.getObs()
@@ -212,17 +256,34 @@ class MazeEnv(gym.Env):
                 return dist, 1
     
     def getObs(self):
-        distU, typeU = self._scan_direction(0, 1)
-        distD, typeD = self._scan_direction(0, -1)
-        distR, typeR = self._scan_direction(1, 0)
-        distL, typeL = self._scan_direction(-1, 0)
-        extras = np.array([m.map(self.coords) for m in self.maps], dtype=np.float32)
-        return np.array([
-            distU/self.num_rows, distD/self.num_rows,
-            distR/self.num_cols, distL/self.num_cols,
-            typeU, typeD, typeR, typeL,
-            *extras
-        ], dtype=np.float32)
+            rays = np.array([], dtype=np.float32)
+            if self.use_ray_scans:
+                distU, typeU = self._scan_direction(0, 1)
+                distD, typeD = self._scan_direction(0, -1)
+                distR, typeR = self._scan_direction(1, 0)
+                distL, typeL = self._scan_direction(-1, 0)
+                rays = np.array([
+                    distU/self.num_rows, distD/self.num_rows,
+                    distR/self.num_cols, distL/self.num_cols,
+                    typeU, typeD, typeR, typeL
+                ], dtype=np.float32)
+            extras = np.array([m.map(self.coords) for m in self.maps], dtype=np.float32)
+            
+            vision = np.array([], dtype=np.float32)
+            if self.vision_range > 0 and self.vision_cache is not None:
+                cx, cy = int(self.coords[0]), int(self.coords[1])
+                xi = cx - self.lowerLeft[0]
+                yi = cy - self.lowerLeft[1]
+                vision = self.vision_cache[xi, yi].copy()
+            
+            last_action_onehot = np.zeros(4, dtype=np.float32)
+            last_action_onehot[self.last_action] = 1.0
+            return np.array([
+                *rays,
+                *extras,
+                *vision,
+                *last_action_onehot
+            ], dtype=np.float32)
     
     def visualize(self, mapInt):
         # 1. Access the specific heatmap
@@ -294,6 +355,7 @@ class MazeEnv(gym.Env):
 
     def step(self, action):
         self.current_step += 1
+        self.last_action = int(action)
         truncated = False
         terminated = False
         

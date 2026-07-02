@@ -67,3 +67,19 @@ def generateWalls(num_cols, num_rows, wall_thickness=2, corridor_thickness=2, lo
                         carve_passage(lx, ly, nlx, nly)
 
     return walls
+
+def generateWallsFixed1(num_cols=11, num_rows=11):
+    walls = np.zeros((num_cols, num_rows), dtype=bool)
+
+    wall_cols = [1, 3, 5, 9]
+
+    for col in wall_cols:
+        if col >= num_cols:
+            continue
+        # fill entire column with walls
+        walls[col, :] = True
+        # punch one random hole
+        hole = random.randint(0, num_rows - 1)
+        walls[col, hole] = False
+
+    return walls
