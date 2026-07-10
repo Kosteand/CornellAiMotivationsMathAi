@@ -21,7 +21,7 @@ matplotlib.use('Agg')  # must be before importing pyplot
 import matplotlib.pyplot as plt
 
 # !!!!!
-useCProfiler = True
+useCProfiler = False
 useTorchProfiler = False # use to test performance, don't use with check_for_NaN_errors
 validate_args_flag = True
 check_for_NaN_errors = False
