@@ -40,6 +40,7 @@ class MazeEnv(gym.Env):
         self.num_rows = self.upperRight[1] - self.lowerLeft[1] + 1
         self.maps = self.buildMaps()
         self.last_action = 0  # default to action 0 before any step is taken
+        self._action_onehots = np.eye(4, dtype=np.float32)
         ##For when pure python is better than vectorized
         self.targetsTuple = set(map(tuple, self.targetCords.tolist()))
 
@@ -274,16 +275,15 @@ class MazeEnv(gym.Env):
                 cx, cy = int(self.coords[0]), int(self.coords[1])
                 xi = cx - self.lowerLeft[0]
                 yi = cy - self.lowerLeft[1]
-                vision = self.vision_cache[xi, yi].copy()
+                vision = self.vision_cache[xi, yi]
             
-            last_action_onehot = np.zeros(4, dtype=np.float32)
-            last_action_onehot[self.last_action] = 1.0
-            return np.array([
-                *rays,
-                *extras,
-                *vision,
-                *last_action_onehot
-            ], dtype=np.float32)
+
+            return np.concatenate([
+                rays,
+                extras,
+                vision,
+                self._action_onehots[self.last_action]
+            ])
     
     def visualize(self, mapInt):
         # 1. Access the specific heatmap
@@ -361,7 +361,7 @@ class MazeEnv(gym.Env):
         
         if self.current_step >= self.max_steps:
             truncated = True
-            reward = -0.01
+            reward = 0 # !!!!! used to be -0.01
             return self.getObs(), reward, terminated, truncated, {}
  
         direction = action
@@ -384,12 +384,13 @@ class MazeEnv(gym.Env):
         if len(hits) > 0:
             reward = self.targetAwards[hits[0]]
             terminated = True
+            return self.getObs(), reward, terminated, truncated, {"target_hit": int(hits[0])}
         else:
             if not self._is_valid_position(self.coords):
                 self.coords = oldLoc
-                reward = -0.1
+                reward = -0.1 # !!!!! used to be -0.1
             else:
-                reward = -0.1
+                reward = -0.1 # !!!!! used to be -0.1
               
         truncated  = False
         return self.getObs(), reward, terminated, truncated, {}
