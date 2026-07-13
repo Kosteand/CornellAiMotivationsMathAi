@@ -544,7 +544,8 @@ if saveWeights:
         with torch.no_grad():
             while not done:
                 _, actionLogits, lstmStateEval = agent.forward(obs[None, :], lstmStateEval)
-                action = torch.argmax(actionLogits, dim=-1).item()
+                action_pd = torch.distributions.Categorical(logits=actionLogits, validate_args=validate_args_flag)
+                action = action_pd.sample()
                 obs, reward, terminated, truncated, info = evalEnv.step(action)
                 done = terminated or truncated
 
