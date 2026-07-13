@@ -3,3 +3,6 @@ src/venv/
 venv/
 src/venv/
 src/weights/
+src/eval_logs/eval_results.txt
+src/eval_logs/returns.csv
+src/eval_logs/returns_plot.png

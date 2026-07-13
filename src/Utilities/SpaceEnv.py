@@ -43,6 +43,7 @@ class MazeEnv(gym.Env):
         self._action_onehots = np.eye(4, dtype=np.float32)
         ##For when pure python is better than vectorized
         self.targetsTuple = set(map(tuple, self.targetCords.tolist()))
+        self.last_target_hit = -1
 
         if not (self.lowerLeft.shape == (2,) and 
                 self.upperRight.shape == (2,) and 
@@ -178,6 +179,7 @@ class MazeEnv(gym.Env):
         super().reset(seed=seed)
         self.current_step = 0
         self.last_action = 0
+        self.last_target_hit = -1
         if(randomSize):
             random_x = self.np_random.integers(-20, 20)
             random_y = self.np_random.integers(-20, 20)
@@ -360,7 +362,7 @@ class MazeEnv(gym.Env):
         terminated = False
         
         if self.current_step >= self.max_steps:
-            truncated = True
+            terminated = True
             reward = 0 # !!!!! used to be -0.01
             return self.getObs(), reward, terminated, truncated, {}
  
@@ -384,13 +386,14 @@ class MazeEnv(gym.Env):
         if len(hits) > 0:
             reward = self.targetAwards[hits[0]]
             terminated = True
+            self.last_target_hit = int(hits[0])
             return self.getObs(), reward, terminated, truncated, {"target_hit": int(hits[0])}
         else:
             if not self._is_valid_position(self.coords):
                 self.coords = oldLoc
-                reward = -0.1 # !!!!! used to be -0.1
+                reward = 0 # !!!!! used to be -0.1
             else:
-                reward = -0.1 # !!!!! used to be -0.1
+                reward = 0 # !!!!! used to be -0.1
               
         truncated  = False
         return self.getObs(), reward, terminated, truncated, {}

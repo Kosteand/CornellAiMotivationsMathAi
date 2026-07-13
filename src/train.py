@@ -368,8 +368,8 @@ if saveWeights:
         actorLr_current = max(actorLr_current, 1e-5)
         for param_group in agent.actor_optim.param_groups:
             param_group['lr'] = actorLr_current
-        if samplePhase % 100 == 0 and samplePhase>0 and current_max_steps > min_steps:
-            current_max_steps -= step_decay
+        if (samplePhase+1) % 100 == 0 and current_max_steps > min_steps:
+            current_max_steps -= min(step_decay, current_max_steps-min_steps)
 
             env.set_attr("max_steps", current_max_steps)
             print(f"Tightening the clock! New Max Steps: {current_max_steps}")
@@ -394,6 +394,7 @@ if saveWeights:
 
         epInfos = []
 
+        epTargetHits = {}
         for step in range(nStepsPerUpdate):
             actions, actionLogProbs, stateValuePreds, entropy, lstmState = agent.select_action(
             states, lstmState)
@@ -401,6 +402,9 @@ if saveWeights:
             epEntropies[step] = entropy
             epActions[step] = actions
             states, rewards, terminated, truncated, infos = envWrapper.step(actions.numpy())
+            for i, term in enumerate(terminated):
+                if term:
+                    epTargetHits[(step, i)] = env.get_attr("last_target_hit")[i]
             epInfos.append(infos)
             
             dones_list = [term or trunc for term, trunc in zip(terminated, truncated)]
@@ -470,21 +474,17 @@ if saveWeights:
                   agent.update_parameters(critic_loss, actor_loss)
 
         
-        # Log episodes that completed during this update's rollout
         with open("eval_logs/returns.csv", "a") as f:
-            for step_info in epInfos:
+            for step_idx, step_info in enumerate(epInfos):
                 if step_info is not None and "_episode" in step_info:
                     episode_mask = step_info["_episode"]
                     episode_returns = step_info["episode"]["r"]
-                    final_info = step_info.get("final_info", [{}] * nEnvs)
                     for i, finished in enumerate(episode_mask):
                         if finished:
-                            env_info = final_info[i] if final_info is not None and i < len(final_info) else {}
-                            target = env_info.get("target_hit", -1) if env_info else -1
-                            #print(f"final_info type: {type(final_info)}, env_info: {env_info}, target: {target}")
-                            f.write(f"{samplePhase},{episode_returns[i]},{target}\n") # 0 means left target, 1 means right target, -1 means no target
+                            target = epTargetHits.get((step_idx, i), -1)
+                            f.write(f"{samplePhase},{episode_returns[i]},{target}\n") # 1 means left reward, 0 means right reward, -1 means no reward
 
-        if (samplePhase+1) % 100 == 0:
+        if (samplePhase+1) % 100 == 0 and False: # !!!!! currently turned off, can turn back on later
             agent.actor.eval()
             agent.critic.eval()
             agent.lstm.eval()
@@ -517,6 +517,50 @@ if saveWeights:
 
 
 
+    """ Run 100 eval episodes after training """
+    agent.actor.eval()
+    agent.critic.eval()
+    agent.lstm.eval()
+
+    left_count = 0
+    right_count = 0
+    no_reward_count = 0
+
+    print("Running 100 post-training eval episodes...")
+    for eval_run in range(100):
+        evalHeatMapTypes = []
+        evalEnv = MazeEnv(low, high, spawn, target_awards, target_coords,
+                          heatMapTypes=evalHeatMapTypes, vision_range=1, use_ray_scans=False)
+        resetOptions = {
+            "randomSpawn": False,
+            "randomSize": False,
+            "randomTargetCoords": False,
+            "max_steps": 500
+        }
+        obs, info = evalEnv.reset(options=resetOptions)
+        done = False
+        lstmStateEval = None
+
+        with torch.no_grad():
+            while not done:
+                _, actionLogits, lstmStateEval = agent.forward(obs[None, :], lstmStateEval)
+                action = torch.argmax(actionLogits, dim=-1).item()
+                obs, reward, terminated, truncated, info = evalEnv.step(action)
+                done = terminated or truncated
+
+        if terminated:
+            if evalEnv.last_target_hit == 0:
+                left_count += 1
+            elif evalEnv.last_target_hit == 1:
+                right_count += 1
+            else:
+                no_reward_count += 1
+
+        evalEnv.close()
+
+    print(f"Left target: {left_count}, Right target: {right_count}, No reward: {no_reward_count}")
+
+
     """ plot the results """
 
     # %matplotlib inline
@@ -525,7 +569,7 @@ if saveWeights:
     rolling_length = 20
     fig, axs = plt.subplots(nrows=2, ncols=2, figsize=(12, 5))
     fig.suptitle(
-        f"Training plots for {agent.__class__.__name__} in the LunarLander-v3 environment \n \
+        f"Training plots for {agent.__class__.__name__} \n \
                 (n_envs={nEnvs}, n_steps_per_update={nStepsPerUpdate})"
     )
 
