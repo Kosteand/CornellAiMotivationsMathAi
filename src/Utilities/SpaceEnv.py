@@ -25,9 +25,11 @@ class MazeEnv(gym.Env):
     def __init__(self,lowerLeft: npt.NDArray[np.int_], upperRight: npt.NDArray[np.int_], 
                     spawn: npt.NDArray[np.int_],targetAwards: npt.NDArray[np.int_],
                     targetCords : npt.NDArray[np.int_], heatMapTypes:list = [],
-                    walls: np.ndarray | None = None, vision_range: int = 0, use_ray_scans: bool = True):
+                    walls: np.ndarray | None = None, vision_range: int = 0, use_ray_scans: bool = True,
+                    step_penalty: float = 0.1):
         super(MazeEnv, self).__init__()
         self.heatMapTypes = heatMapTypes
+        self.step_penalty = step_penalty
         self.max_steps = 1000  # Default starting limit decays
         self.current_step = 0
         self.lowerLeft = np.array(lowerLeft)
@@ -391,9 +393,9 @@ class MazeEnv(gym.Env):
         else:
             if not self._is_valid_position(self.coords):
                 self.coords = oldLoc
-                reward = 0 # !!!!! used to be -0.1
+                reward = -self.step_penalty
             else:
-                reward = 0 # !!!!! used to be -0.1
+                reward = -self.step_penalty
               
         truncated  = False
         return self.getObs(), reward, terminated, truncated, {}
