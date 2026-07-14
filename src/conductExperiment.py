@@ -9,7 +9,7 @@ import torch.nn as nn
 from torch import optim
 from tqdm import tqdm
 from functools import partial
-
+from Utilities.MultiHeatMap import *
 import cProfile
 import pstats
 import io
@@ -44,6 +44,9 @@ def mapLabel(m) -> str:
         component = m.keywords.get("component")
         if component is not None:
             parts.append(f"c{int(component)}")
+        N = m.keywords.get("N")
+        if N is not None:
+            parts.append(f"N:c{int(N)}")
         return "_".join(parts)
     if isinstance(m, type):
         ts = getattr(m, "toString", None)
@@ -54,6 +57,7 @@ def mapLabel(m) -> str:
                 pass
         return m.__name__
     ts = getattr(m, "toString", None)
+    print("HEREHEREHERE::"+ts)
     if ts is not None:
         try:
             return ts()
@@ -61,7 +65,9 @@ def mapLabel(m) -> str:
             pass
     return type(m).__name__
 
-
+# Currently this file, was used to sanity check the model with PPO. It also ahs the skeleton
+# For testing various noise levels. The ewnxt step is to integrate the different complexity heatmaps here
+#Which should just be a few lines
 # Noise std per sweep index, in normalized [0,1] heatmap units (because getObs now
 # divides each channel by its range). The per-step gradient of a distance field is
 # ~1/range ≈ 0.012 normalized, so NOISE_STEP=0.01 sweeps from clean (i=0) up to
@@ -140,6 +146,9 @@ class ActoCritic(nn.Module):
         self.actor_optim = optim.RMSprop(self.actor.parameters(), lr=actor_lr)
         
     def forward(self, x: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+
+        #print("x going into network:", x.shape)          # currently (1, 22) — suspicious
+
         """
         Forward pass of the networks.
 
@@ -151,7 +160,7 @@ class ActoCritic(nn.Module):
             action_logits_vec: A tensor with the action logits, with shape [n_envs, n_actions].
         """
         x = torch.Tensor(x).to(self.device)
-        x = x.squeeze(1)
+        x = x.reshape(x.shape[0], -1)
         state_values = self.critic(x)  # shape: [n_envs,]
         action_logits_vec = self.actor(x)  # shape: [n_envs, n_actions]
         return (state_values, action_logits_vec)
@@ -240,7 +249,7 @@ class ActoCritic(nn.Module):
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Running RL Training on: {device.upper()}")
+#print(f"Running RL Training on: {device.upper()}")
 
 #DI you want to train and create new weeights or use old weights
 saveWeights = True
@@ -272,7 +281,10 @@ def trainAgent(mapsTypes):
     # Skip-if-done: resume a killed sweep at the next untrained noise level.
     # A finished agent leaves weights tagged "UV" (just trained) which testValidity
     # later renames to "pass"/"fail" — if any of those exist, this level is done.
-    label = mapLabel(mapsTypes[0]) + mapLabel(mapsTypes[1])
+    if(len(mapsTypes)>1):
+        label = mapLabel(mapsTypes[0]) + mapLabel(mapsTypes[1])
+    else:
+        label = mapLabel(mapsTypes[0])
     if any(os.path.isfile(f"weights/actor_weights{label}{suf}.h5") for suf in ("UV", "pass", "fail")):
         print(f"Skipping already-trained agent: {label}")
         return
@@ -280,7 +292,8 @@ def trainAgent(mapsTypes):
     nEnvs = 22
 
     env = gym.vector.SyncVectorEnv([makeEnv(mapsTypes) for _ in range(nEnvs)])
-
+    #print("single obs space:", env.single_observation_space.shape)   # you say (1,)
+    #print("n_envs:", env.num_envs) 
     obsShape = env.single_observation_space.shape[0]
     actionShape = env.single_action_space.n
 
@@ -305,7 +318,7 @@ def trainAgent(mapsTypes):
     criticLosses = []
     actorLosses = []
     entropies = []
-    current_max_steps = 20
+    current_max_steps = 250
     min_steps = 250
     step_decay = 15
     resetOptions = {
@@ -338,7 +351,6 @@ def trainAgent(mapsTypes):
             states,__ = envWrapper.reset(options=resetOptions)
             
         epEntropies = torch.zeros(nStepsPerUpdate, nEnvs, device=device)
-        
         
         for step in range(nStepsPerUpdate):
             actions, actionLogProbs, stateValuePreds, entropy= agent.select_action(
@@ -458,15 +470,15 @@ def trainAgent(mapsTypes):
 
     plt.tight_layout()
     plt.show()
-    plt.savefig("result1"+ mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1]))##todo
+    plt.savefig("result1"+ mapLabel(mapsTypes[0]))##todo
 
 
 
 
     if not os.path.exists("weights"):
         os.mkdir("weights")
-    actor_weights_path = "weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5"
-    critic_weights_path = "weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5"
+    actor_weights_path = "weights/actor_weights"+mapLabel(mapsTypes[0])+"UV"+".h5"
+    critic_weights_path = "weights/critic_weights"+mapLabel(mapsTypes[0])+"UV"+".h5"
     """ save network weights """
     torch.save(agent.actor.state_dict(), actor_weights_path)
     torch.save(agent.critic.state_dict(), critic_weights_path)
@@ -491,8 +503,8 @@ def testValidity(mapsTypes):
     
     agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, n_envs=1)
     
-    actor_weights_path = "weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5"
-    critic_weights_path = "weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5"
+    actor_weights_path = "weights/actor_weights"+mapLabel(mapsTypes[0])+"UV"+".h5"
+    critic_weights_path = "weights/critic_weights"+mapLabel(mapsTypes[0])+"UV"+".h5"
 
     agent.actor.load_state_dict(torch.load(actor_weights_path))
     agent.critic.load_state_dict(torch.load(critic_weights_path))
@@ -531,19 +543,19 @@ def testValidity(mapsTypes):
             
             # 3. Step the environment
             obs, reward, terminated, truncated, info = evalEnv.step(action)
-            evalEnv.unwrapped.visualize(1)
             print(evalEnv.unwrapped.coords)
             totalReward += reward
             done = terminated or truncated
             if(done):
                 if(terminated):
-                    print(mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"pass")
-                    os.rename("weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5","weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"pass"+".h5")
-                    os.rename("weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5","weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"pass"+".h5")
+                    print(mapLabel(mapsTypes[0])+"pass")
+                    os.rename("weights/actor_weights"+mapLabel(mapsTypes[0])+"UV"+".h5","weights/actor_weights"+mapLabel(mapsTypes[0])+"pass"+".h5")
+                    os.rename("weights/critic_weights"+mapLabel(mapsTypes[0])+"UV"+".h5","weights/critic_weights"+mapLabel(mapsTypes[0])+"pass"+".h5")
                 else:
-                    print(mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"fail")
-                    os.rename("weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5","weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"fail"+".h5")
-                    os.rename("weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"UV"+".h5","weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"fail"+".h5")
+                    print(mapLabel(mapsTypes[0])+mapLabel(mapsTypes[0])+"fail")
+                    print(f"Tareget was at{evalEnv.targetCords[0]}{evalEnv.targetCords[1]}")
+                    os.rename("weights/critic_weights"+mapLabel(mapsTypes[0])+"UV"+".h5","weights/critic_weights"+mapLabel(mapsTypes[0])+"fail"+".h5")
+                    os.rename("weights/actor_weights"+mapLabel(mapsTypes[0])+"UV"+".h5","weights/actor_weights"+mapLabel(mapsTypes[0])+"fail"+".h5")
 
 
     print(f"Final Score: {totalReward}")
@@ -580,8 +592,9 @@ def testBinaryMapStrength(mapsTypes):
 
 
     agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, n_envs=1)
-    actor_weights_path = "weights/actor_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"pass"+".h5"
-    critic_weights_path = "weights/critic_weights"+mapLabel(mapsTypes[0])+mapLabel(mapsTypes[1])+"pass"+".h5"
+    actor_weights_path = "weights/actor_weights"+mapLabel(mapsTypes[0])+"UV"+".h5"
+    critic_weights_path = "weights/critic_weights"+mapLabel(mapsTypes[0])+"UV"+".h5"
+
     if not(os.path.isfile(actor_weights_path)):
         print("EIther agent not failed or not validated")
     else:
@@ -632,14 +645,29 @@ def testBinaryMapStrength(mapsTypes):
 # naming); [2] is the nearest-target version. The agent is handed the optimal
 # action directly, so it should learn fast — this just confirms the new map and
 # TargetWrap integrate end-to-end.
-sanityMaps = [
+'''sanityMaps = [
     partial(TargetWrap, inner_map_type=OptimalActionTarget, targetIndex=0),
     partial(TargetWrap, inner_map_type=OptimalActionTarget, targetIndex=1),
     OptimalActionTarget,
-]
-trainAgent(sanityMaps)
+]'''
+polyMap = [partial(MultiPolynomialInverse, map=OptimalActionTarget, N=1)]
+polyMap2 = [partial(MultiPolynomialInverse, map=OptimalActionTarget, N=2)]
 
-testValidity(sanityMaps)
+polyMap3 = [partial(MultiPolynomialInverse, map=OptimalActionTarget, N=3)]
+
+polyMap4 = [partial(MultiPolynomialInverse, map=OptimalActionTarget, N=4)]
+
+
+trainAgent(polyMap)
+trainAgent(polyMap2)
+
+trainAgent(polyMap3)
+
+trainAgent(polyMap4)
+
+
+print("trained")
+testValidity(polyMap)
 # --- Original noise sweep (re-enable when the sanity run looks good) ---
 # for i in range(10):
 #     trainAgent(buildMapsTypes(i))

@@ -10,7 +10,7 @@ import numpy.typing as npt
 from datetime import datetime
 from functools import partial
 from Utilities.generateWalls import generateWalls
-
+from Utilities.MultiHeatMap import *
 
 class MazeEnv(gym.Env):
     #lowerLeft: The corner of the world that has the lowest possible coords.
@@ -77,16 +77,28 @@ class MazeEnv(gym.Env):
     
     #Size of distance obervation space is now fixed because of issues with using same weights for diff map sizes
     #TODO fix to a maxDim-shouldl be easy
-        obs_size = 8 + len(heatMapTypes)  # 4 dists + 4 types + extras
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32)
+        obs_size = len(heatMapTypes) 
+        for entry in heatMapTypes:
+            # entry may be: a partial, a class, or (rarely) an instance
+            target = entry.func if isinstance(entry, partial) else entry
+
+            # runtime_checkable protocol: issubclass works on the CLASS
+            if isinstance(target, type) and issubclass(target, MultiHeatMappable):
+                # N lives in the partial's keywords/args, not on the class yet
+                n = None
+                if isinstance(entry, partial):
+                    n = entry.keywords.get("N")
+                    if n is None and entry.args:
+                        n = entry.args[0]
+                    obs_size+=n-1
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64)
         
         
 
 
         # 0=up, 1=down, 3=left, 2=right 
         self.action_space = spaces.Discrete(4); 
-        
-
+        #print("declared obs space:", self.observation_space.shape)
 
     def buildMaps(self):
         env_context = {
@@ -117,17 +129,27 @@ class MazeEnv(gym.Env):
                 sig = inspect.signature(mapType)
                 kwargs = {k: v for k, v in env_context.items() if k in sig.parameters}
                 maps.append(mapType(**kwargs))
-
+        
         # Cache each map's normalization range once. getRange() is expensive
         # (rebuilds a meshgrid + linalg.norm), so we must not call it per-step in
         # getObs. These ranges are constant until maps are rebuilt (next reset).
-        self._mapNormLow = np.empty(len(maps), dtype=np.float32)
-        self._mapNormSpan = np.empty(len(maps), dtype=np.float32)
-        for i, m in enumerate(maps):
-            low, high = m.getRange()
-            span = high - low
-            self._mapNormLow[i] = low
-            self._mapNormSpan[i] = span if span > 0 else 1.0
+        low_parts, span_parts = [], []
+        for m in maps:
+            if isinstance(m, MultiHeatMappable):
+                m.pregen()
+                low, high = m.getRange()          # pooled, single pair for the block
+                span = high - low if high - low > 0 else 1.0
+                n = int(m.getAmount())
+                low_parts.append(np.full(n, low, np.float64))    # same const across N channels
+                span_parts.append(np.full(n, span, np.float64))
+            else:
+                low, high = m.getRange()
+                span = high - low if high - low > 0 else 1.0
+                low_parts.append(np.array([low], np.float64))
+                span_parts.append(np.array([span], np.float64))
+
+        self._mapNormLow  = np.concatenate(low_parts)
+        self._mapNormSpan = np.concatenate(span_parts)
         return maps
     
     def reset(self, seed=None, options=None):
@@ -223,22 +245,26 @@ class MazeEnv(gym.Env):
                 return dist, 1
     
     def getObs(self):
-        distU, typeU = self._scan_direction(0, 1)
-        distD, typeD = self._scan_direction(0, -1)
-        distR, typeR = self._scan_direction(1, 0)
-        distL, typeL = self._scan_direction(-1, 0)
+
         # Normalize every heatmap channel to ~[0,1] using its own value range (cached
         # in buildMaps), so all channels share a scale with the normalized distance
         # inputs. NoiseWrap scales its noise to that same range, so after this division
         # the noise std equals the configured noiseLevel directly (normalized units).
-        raw = np.array([m.map(self.coords) for m in self.maps], dtype=np.float32)
+
+        parts = []
+        for m in self.maps:
+            if isinstance(m, MultiHeatMappable):
+                vals = np.asarray(m.mapAll(self.coords), dtype=np.float64).ravel()   # could be N values
+            else:
+                vals = np.asarray(m.map(self.coords), dtype=np.float64).ravel()   # 1 value
+            parts.append(vals)
+        raw = np.concatenate(parts).astype(np.float64)
+
         extras = (raw - self._mapNormLow) / self._mapNormSpan
+        #print("actual getObs shape:", raw.shape)
         return np.array([
-            distU/self.num_rows, distD/self.num_rows,
-            distR/self.num_cols, distL/self.num_cols,
-            typeU, typeD, typeR, typeL,
             *extras
-        ], dtype=np.float32)
+        ], dtype=np.float64)
     
     def visualize(self, mapInt):
         # 1. Access the specific heatmap
@@ -261,7 +287,7 @@ class MazeEnv(gym.Env):
                 
                 # Call the mapping function for this single point
                 zVal[idx_y, idx_x] = target_map.map(current_coord)
-
+            
         # 5. Plotting
         fig, ax = plt.subplots(figsize=(8, 6))
     
@@ -314,9 +340,12 @@ class MazeEnv(gym.Env):
         terminated = False
         
         if self.current_step >= self.max_steps:
-            truncated = True
+            # Out of steps is now a TERMINATION (a real, counted miss: targetHit == -1),
+            # NOT a truncation. Truncation is reserved for the training loop's buffer
+            # boundary; the env itself never truncates.
+            terminated = True
             reward = -0.01
-            return self.getObs(), reward, terminated, truncated, {}
+            return self.getObs(), reward, terminated, truncated, {"targetHit":-1}
  
         direction = action
         stepSize = 1
@@ -332,12 +361,14 @@ class MazeEnv(gym.Env):
 
         # 2. A target is hit only if BOTH x and y match (logical AND across axis 1)
         # hits will be a 1D boolean array of shape (N,)
+        targetHit = -1
         hits = np.where(
              np.all(self.targetCords == self.coords[None, :], axis=1)
         )[0]
         if len(hits) > 0:
             reward = self.targetAwards[hits[0]]
             terminated = True
+            targetHit = hits[0]
         else:
             if not self._is_valid_position(self.coords):
                 self.coords = oldLoc
@@ -346,7 +377,7 @@ class MazeEnv(gym.Env):
                 reward = -0.1
               
         truncated  = False
-        return self.getObs(), reward, terminated, truncated, {}
+        return self.getObs(), reward, terminated, truncated, {"targetHit":targetHit,}
             
             
 
