@@ -17,8 +17,10 @@ from Utilities.SpaceEnv import MazeEnv
 
 # MazeEnv's action space is Discrete(4): direction = action, with
 # even/odd choosing +1/-1 and //2 choosing the y-axis vs x-axis (see
-# SpaceEnv.py's step()). Since the two targets sit at [0,5] (left) and
-# [10,5] (right), increasing x moves toward the right target.
+# SpaceEnv.py's step()). Since the two targets sit near [95,5] (left) and
+# [105,5] (right) on this branch's map -- a walled-off-free 200x10 corridor
+# running from (0,0) to (200,10), with the agent spawning at (100,5) --
+# increasing x moves toward the right target.
 # NOTE: up/down here assumes increasing y is "up" -- flip if your
 # convention runs the other way, this doesn't affect training itself,
 # only the label written to episode_info.csv.
@@ -260,11 +262,11 @@ def run_training(
     clip_eps: float = 0.2,
     gamma: float = 0.99,
     lam: float = 0.95,
-    beginEntropy: float = 0.15,
-    endEntropy: float = 0.05,
+    beginEntropy: float = 0.02,
+    endEntropy: float = 0.02,
     # environment / reward shaping
-    step_penalty: float = -0.1,
-    left_reward: float = 1000,
+    step_penalty: float = 0.0,
+    left_reward: float = 10,
     right_reward: float = 10,
     max_steps: int = 500,
     min_steps: int = 500,
@@ -290,6 +292,15 @@ def run_training(
     train.py script) with the given hyperparameters/settings, then runs
     post-training eval episodes until `target_hits` episodes have reached
     a target (see run_eval_until_target_hits for the stall-abort behavior).
+
+    This branch's map: a wall-free corridor from (0,0) to (200,10). The
+    agent spawns at (100,5); the left target starts at (95,5) and the
+    right target sits at (105,5), each worth left_reward/right_reward
+    (both default to 10). left_reward, and the left target's position, are
+    expected to be mutated mid-run by an external curriculum controller
+    (see the progress_callback contract below) rather than only being set
+    once at the start -- right_reward and the right target's position are
+    not touched by this branch's experiment and stay fixed throughout.
 
     criticLrFloor and actorLrFloor are the linear-decay floors: criticLr
     decays linearly to criticLrFloor over lrDecayHorizon, while actorLr
@@ -372,7 +383,10 @@ def run_training(
     right at the start of training (before the policy has learned
     anything real) can't trigger a spurious early stop. Disabled by
     default (early_stop_patience=0) to preserve the original script's
-    behavior exactly when not explicitly opted into.
+    behavior exactly when not explicitly opted into. NOTE: this branch's
+    curriculum controller (see progress_callback below) leaves this
+    disabled and manages its own stopping/continuation logic instead --
+    the two mechanisms are not meant to be combined.
 
     actor_weight_decay, critic_weight_decay, lstm_weight_decay: L2 weight
     decay passed directly to each component's AdamW optimizer (the actor
@@ -390,15 +404,32 @@ def run_training(
     same values written to update_info.csv this update), plus
     left_count/right_count/miss_count (ints, tallied from THIS update's
     finished episodes only). This exists so an external caller (e.g. an
-    Optuna objective function) can inspect training as it happens and
-    decide to abort early -- do this by raising optuna.TrialPruned() (or
-    any other exception) from inside the callback; it will propagate up
-    through run_training() uncaught, skipping the post-training eval and
+    Optuna objective function, or this branch's distance/reward curriculum
+    controller) can inspect training as it happens and decide to abort
+    early -- do this by raising optuna.TrialPruned() (or any other
+    exception) from inside the callback; it will propagate up through
+    run_training() uncaught, skipping the post-training eval and
     weight-saving entirely (which is the point: a pruned trial shouldn't
-    pay for either). A normal (non-raising) callback has no effect on
-    training whatsoever -- it's called purely for its side effects on
-    whatever object owns it (e.g. accumulating history, calling
-    trial.report()), never using its return value.
+    pay for either).
+
+    progress_callback's RETURN VALUE is also inspected: if it returns a
+    truthy dict, each key/value pair in that dict is applied to the live
+    vector env via env.set_attr(key, value) immediately after the
+    callback runs, before the next update starts -- exactly like this
+    function already does internally for max_steps ("Tightening the
+    clock!" above). This is how a caller mutates the map/reward
+    mid-training without restarting the agent, optimizer, or LSTM state:
+    e.g. returning {"target_coords": np.array([[94, 5], [105, 5]]),
+    "target_awards": np.array([12.0, 10.0])} moves the left target one
+    step further out and updates both targets' reward values on the very
+    next update. Returning None (or any other falsy value) applies no
+    changes, which is also what happens if progress_callback is left
+    unset. A normal (non-raising) callback that doesn't need to change
+    anything has no other effect on training -- it's called purely for
+    its side effects on whatever object owns it (e.g. accumulating
+    history, calling trial.report(), or updating a curriculum
+    controller's own internal state), never using any other part of its
+    return value.
     """
     if lrDecayHorizon is None:
         lrDecayHorizon = nUpdates
@@ -418,9 +449,9 @@ def run_training(
     lstm_weights_path = "weights/lstm_weights.h5"
 
     low = np.array([0, 0])
-    high = np.array([10, 10])
-    spawn = np.array([7, 5])
-    target_coords = np.array([[0, 5], [10, 5]])
+    high = np.array([200, 10])
+    spawn = np.array([100, 5])
+    target_coords = np.array([[95, 5], [105, 5]])
     target_awards = np.array([left_reward, right_reward])
 
     def makeEnv():
@@ -522,15 +553,15 @@ def run_training(
 
     for samplePhase in tqdm(range(nUpdates)):
         entropyBonus = max(endEntropy, beginEntropy - (samplePhase * 2 / entropyDecayHorizon) * (beginEntropy - endEntropy))
-        lr = criticLr * (1 - samplePhase / lrDecayHorizon)
+        lr = criticLr
         lr = max(lr, criticLrFloor)
         for param_group in agent.critic_optim.param_groups:
             param_group['lr'] = lr
-        lstmLr_current = lstmLr * (1 - samplePhase / lrDecayHorizon)
+        lstmLr_current = lstmLr
         lstmLr_current = max(lstmLr_current, lstmLrFloor)
         for param_group in agent.lstm_optim.param_groups:
             param_group['lr'] = lstmLr_current
-        actorLr_current = actorLr * (1 - samplePhase / lrDecayHorizon)
+        actorLr_current = actorLr
         actorLr_current = max(actorLr_current, actorLrFloor)
         for param_group in agent.actor_optim.param_groups:
             param_group['lr'] = actorLr_current
@@ -670,7 +701,7 @@ def run_training(
             this_update_left = sum(1 for v in epTargetHits.values() if v == 0)
             this_update_right = sum(1 for v in epTargetHits.values() if v == 1)
             this_update_miss = sum(1 for v in epTargetHits.values() if v == -1)
-            progress_callback(samplePhase, {
+            env_updates = progress_callback(samplePhase, {
                 "critic_loss": float(criticLosses[-1]),
                 "actor_loss": float(actorLosses[-1]),
                 "entropy": float(entropies[-1]),
@@ -681,6 +712,14 @@ def run_training(
                 "right_count": this_update_right,
                 "miss_count": this_update_miss,
             })
+            # See the progress_callback docstring above: a truthy dict return
+            # value is applied to the live vector env attribute-by-attribute,
+            # e.g. {"target_coords": ..., "target_awards": ...} to move/
+            # re-value a target mid-run, exactly like max_steps is mutated
+            # above via env.set_attr.
+            if env_updates:
+                for attr_name, attr_value in env_updates.items():
+                    env.set_attr(attr_name, attr_value)
 
         if (recent_hit_targets is not None
                 and samplePhase + 1 >= early_stop_min_updates

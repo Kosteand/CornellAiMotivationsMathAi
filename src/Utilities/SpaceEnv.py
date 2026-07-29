@@ -76,8 +76,13 @@ class MazeEnv(gym.Env):
                   raise ValueError(f"Target {coord} cannot be on a wall")
           self.walls = walls
         else:
-          self.walls = generateWallsFixed1()
-          #self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool) !!!!!
+          # This branch's map is wall-free by design, and generateWallsFixed1()
+          # defaults to a hardcoded 11x11 grid (wall_cols=[1,3,5,9]) that
+          # doesn't scale to this map's actual size -- it crashed here once
+          # num_cols grew past 11 (e.g. the 201-wide map), since the walls
+          # array it returned no longer matched tile_map's shape.
+          #self.walls = generateWallsFixed1()
+          self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
           
           
           
@@ -194,11 +199,13 @@ class MazeEnv(gym.Env):
             self.upperRight = self.lowerLeft+[random_x_size,random_y_size]
             self.num_cols = self.upperRight[0] - self.lowerLeft[0] + 1
             self.num_rows = self.upperRight[1] - self.lowerLeft[1] + 1
-        #TO stop walls from gettign in the way until they are fully impl
-        #self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
-
-        self.walls = generateWallsFixed1()
-        #self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool) !!!!!
+        # Same fix as __init__: this branch's map is wall-free, and
+        # generateWallsFixed1()'s hardcoded 11x11 default doesn't match
+        # this map's actual (num_cols, num_rows) -- keep it in sync with
+        # __init__ so a reset (e.g. after randomSize) doesn't reintroduce
+        # the shape-mismatch crash.
+        #self.walls = generateWallsFixed1()
+        self.walls = np.zeros((self.num_cols, self.num_rows), dtype=bool)
         
         if(randomSpawn or randomSize):
             foundValidSpawn = False
