@@ -92,6 +92,18 @@ ATTEMPTS_CSV = "eval_logs/distance_reward_attempts.csv"
 HEARTBEAT_INTERVAL = 250
 WAIT_PRINT_INTERVAL = 10
 
+# Collapse/runaway guard: if the gallop phase doubles its step this many
+# times in a row without EVER crossing to the other side of 50/50, that's
+# not "the right value is just further away than expected" -- a step that
+# keeps doubling GALLOP_WARNING_DOUBLINGS times has already multiplied the
+# reward by 2**GALLOP_WARNING_DOUBLINGS (256x at the default of 8), and if
+# that still isn't enough to pull even one episode the other way, the
+# policy has most likely stopped exploring that action entirely (e.g. it
+# collapsed to a fully deterministic policy and there's no exploration
+# left to ever notice the reward changed). Printed once per distance so
+# it doesn't spam every subsequent doubling.
+GALLOP_WARNING_DOUBLINGS = 8
+
 # Entropy bonus: held flat (no decay) rather than annealed, since the task
 # itself keeps changing underneath the policy (distance/reward moves) --
 # annealing exploration to near-zero would fight against needing to keep
@@ -143,6 +155,10 @@ class DistanceRewardCurriculum:
         self.best_diff = float("inf")
         self.best_left_pct = None
         self.best_hit_pct = None
+
+        # See GALLOP_WARNING_DOUBLINGS above.
+        self.gallop_doublings = 0
+        self._gallop_warning_printed = False
 
         # One entry per finished distance, in order -- this is what lets
         # main() print a full distance -> left_reward summary at the end
@@ -216,6 +232,8 @@ class DistanceRewardCurriculum:
         self.best_left_pct = None
         self.best_hit_pct = None
         self._wait_print_count = 0
+        self.gallop_doublings = 0
+        self._gallop_warning_printed = False
 
     # -- the callback itself ----------------------------------------------
 
@@ -304,6 +322,7 @@ class DistanceRewardCurriculum:
             else:
                 self.over_value = self.left_value
             self.stage = "gallop"
+            self.gallop_doublings = 0
             new_value = self.left_value + self.direction * self.step
 
         elif self.stage == "gallop":
@@ -321,7 +340,22 @@ class DistanceRewardCurriculum:
                 else:
                     self.over_value = self.left_value
                 self.step *= 2
+                self.gallop_doublings += 1
                 new_value = self.left_value + self.direction * self.step
+
+                if (self.gallop_doublings >= GALLOP_WARNING_DOUBLINGS
+                        and not self._gallop_warning_printed):
+                    self._gallop_warning_printed = True
+                    growth = 2 ** self.gallop_doublings
+                    print(f"[curriculum] WARNING: distance {self.distance} -- the reward gallop "
+                          f"has doubled {self.gallop_doublings} times ({growth}x growth) without "
+                          f"EVER crossing 50/50. This is very unlikely to mean 'the right value "
+                          f"is just further away' -- it usually means the policy has stopped "
+                          f"exploring the other action entirely (e.g. it collapsed to a fully "
+                          f"deterministic policy) and no reward value will bring it back. Check "
+                          f"for a collapsed/deterministic policy (e.g. one side's episode count "
+                          f"exploding while the other stays at 0) before waiting out the "
+                          f"remaining attempts.")
 
         else:  # bisect
             if need_direction > 0:
