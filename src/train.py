@@ -2,13 +2,17 @@ from run_training import run_training
 
 
 if __name__ == "__main__":
-    left_count, right_count = run_training(
+    left_count, right_count, miss_count = run_training(
         # core PPO / optimization hyperparameters
         criticLr=0.0003,  # make this 5 e-6 or so
         actorLr=0.0001,
         criticLrFloor=3e-5,
         actorLrFloor=1e-5,
+        lstmLr=0.0003,
+        lstmLrFloor=3e-5,
         nUpdates=5000,
+        lrDecayHorizon=5000,       # matches nUpdates -- exactly reproduces the original
+        entropyDecayHorizon=5000,  # LR/entropy decay behavior (see run_training.py docstring)
         nStepsPerUpdate=512,
         ppo_epochs=4,
         clip_eps=0.2,
@@ -17,7 +21,7 @@ if __name__ == "__main__":
         beginEntropy=0.15,
         endEntropy=0.05,
         # environment / reward shaping
-        step_penalty=0.1,
+        step_penalty=0.0,
         left_reward=1000,
         right_reward=10,
         max_steps=500,
@@ -30,6 +34,10 @@ if __name__ == "__main__":
         check_for_NaN_errors=False,
         load_weights=False,
         save_weights=True,
+        target_hits=100,
+        actor_weight_decay=0.0,
+        critic_weight_decay=0.0,
+        lstm_weight_decay=0.0,
     )
 
-    print(f"Left target hits: {left_count},\nRight target hits: {right_count},\nMisses: {100-left_count-right_count}")
+    print(f"Left target hits: {left_count},\nRight target hits: {right_count},\nMisses: {miss_count}")

@@ -2,6 +2,7 @@ import os
 import io
 import cProfile
 import pstats
+from collections import deque
 
 import gymnasium as gym
 import numpy as np
@@ -11,11 +12,17 @@ from torch import optim
 from tqdm import tqdm
 from numba import njit
 
-import matplotlib
-matplotlib.use('Agg')  # must be before importing pyplot
-import matplotlib.pyplot as plt
-
 from Utilities.SpaceEnv import MazeEnv
+
+
+# MazeEnv's action space is Discrete(4): direction = action, with
+# even/odd choosing +1/-1 and //2 choosing the y-axis vs x-axis (see
+# SpaceEnv.py's step()). Since the two targets sit at [0,5] (left) and
+# [10,5] (right), increasing x moves toward the right target.
+# NOTE: up/down here assumes increasing y is "up" -- flip if your
+# convention runs the other way, this doesn't affect training itself,
+# only the label written to episode_info.csv.
+ACTION_NAMES = {0: "up", 1: "down", 2: "right", 3: "left"}
 
 
 @njit
@@ -43,6 +50,10 @@ class ActoCritic(nn.Module):
         lstm_hidden_size: int = 128,
         lstm_num_layers: int = 2,
         validate_args_flag: bool = True,
+        actor_weight_decay: float = 0.0,
+        critic_weight_decay: float = 0.0,
+        lstm_weight_decay: float = 0.0,
+        lstm_lr: np.float32 = None,
     ) -> None:
 
         super().__init__()
@@ -51,6 +62,9 @@ class ActoCritic(nn.Module):
         self.lstm_hidden_size = lstm_hidden_size
         self.lstm_num_layers = lstm_num_layers
         self.validate_args_flag = validate_args_flag
+
+        if lstm_lr is None:
+            lstm_lr = critic_lr  # preserves the original shared-schedule behavior if not given
 
         self.lstm = nn.LSTM(n_features, self.lstm_hidden_size, num_layers=self.lstm_num_layers, batch_first=True).to(device)
 
@@ -77,9 +91,9 @@ class ActoCritic(nn.Module):
         self.critic = nn.Sequential(*critic_layers).to(self.device)
         self.actor = nn.Sequential(*actor_layers).to(self.device)
 
-        self.critic_optim = optim.AdamW(self.critic.parameters(), lr=critic_lr, weight_decay=0)
-        self.actor_optim = optim.AdamW(self.actor.parameters(), lr=actor_lr, weight_decay=0)
-        self.lstm_optim = optim.AdamW(self.lstm.parameters(), lr=critic_lr, weight_decay=0)
+        self.critic_optim = optim.AdamW(self.critic.parameters(), lr=critic_lr, weight_decay=critic_weight_decay)
+        self.actor_optim = optim.AdamW(self.actor.parameters(), lr=actor_lr, weight_decay=actor_weight_decay)
+        self.lstm_optim = optim.AdamW(self.lstm.parameters(), lr=lstm_lr, weight_decay=lstm_weight_decay)
 
     def forward(self, x: np.ndarray, lstmState=None):
         x = torch.Tensor(x).to(next(self.parameters()).device)
@@ -147,13 +161,87 @@ class ActoCritic(nn.Module):
 
         (critic_loss + actor_loss).backward()
 
-        nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=0.5)
-        nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)
-        nn.utils.clip_grad_norm_(self.lstm.parameters(), max_norm=0.5)
+        # clip_grad_norm_ returns the PRE-clipping norm -- capturing these
+        # lets us see how often/how hard clipping is actually engaging,
+        # rather than guessing.
+        critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=0.5)
+        actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)
+        lstm_grad_norm = nn.utils.clip_grad_norm_(self.lstm.parameters(), max_norm=0.5)
 
         self.critic_optim.step()
         self.actor_optim.step()
         self.lstm_optim.step()
+
+        return (float(critic_grad_norm), float(actor_grad_norm), float(lstm_grad_norm))
+
+
+def run_eval_until_target_hits(agent, low, high, spawn, target_awards, target_coords,
+                                 step_penalty, target_hits=100,
+                                 stall_check_interval=100, stall_hit_rate=0.10):
+    """
+    Runs fresh eval episodes with an already-trained agent until `target_hits`
+    episodes have reached EITHER target (left or right). Misses (timeouts
+    that reach neither target) don't count toward target_hits, but ARE
+    tallied and returned separately.
+
+    Safety abort ("stall check"): every `stall_check_interval` episodes
+    attempted (default every 100), if the number of hits so far is below
+    `stall_hit_rate` (default 10%) of episodes attempted, evaluation stops
+    early rather than potentially running forever on an agent that's
+    essentially never reaching a target. E.g. with the defaults: stop if
+    fewer than 10 hits after 100 episodes, fewer than 20 after 200, etc.
+
+    Returns (left_count, right_count, miss_count, total_episodes, stalled).
+    If stalled is True, left_count + right_count will be less than
+    target_hits -- the caller should treat this run as inconclusive rather
+    than a valid sample of the agent's true left/right split.
+    """
+    left_count = 0
+    right_count = 0
+    miss_count = 0
+    total_episodes = 0
+    stalled = False
+
+    while left_count + right_count < target_hits:
+        evalEnv = MazeEnv(low, high, spawn, target_awards, target_coords,
+                          heatMapTypes=[], vision_range=1, use_ray_scans=False,
+                          step_penalty=step_penalty)
+        evalResetOptions = {
+            "randomSpawn": False,
+            "randomSize": False,
+            "randomTargetCoords": False,
+            "max_steps": 500
+        }
+        obs, info = evalEnv.reset(options=evalResetOptions)
+        done = False
+        lstmStateEval = None
+        terminated = False
+
+        with torch.no_grad():
+            while not done:
+                actions, _, _, _, lstmStateEval = agent.select_action(obs[None, :], lstmStateEval)
+                action = actions.item()
+                obs, reward, terminated, truncated, info = evalEnv.step(action)
+                done = terminated or truncated
+
+        total_episodes += 1
+        if terminated and evalEnv.last_target_hit == 0:
+            left_count += 1
+        elif terminated and evalEnv.last_target_hit == 1:
+            right_count += 1
+        else:
+            miss_count += 1
+
+        evalEnv.close()
+
+        if total_episodes % stall_check_interval == 0:
+            hits_so_far = left_count + right_count
+            required_hits = stall_hit_rate * total_episodes
+            if hits_so_far < required_hits:
+                stalled = True
+                break
+
+    return left_count, right_count, miss_count, total_episodes, stalled
 
 
 def run_training(
@@ -162,7 +250,11 @@ def run_training(
     actorLr: float = 0.0001,
     criticLrFloor: float = 3e-5,
     actorLrFloor: float = 1e-5,
+    lstmLr: float = 0.0003,
+    lstmLrFloor: float = 3e-5,
     nUpdates: int = 5000,
+    lrDecayHorizon: int = None,
+    entropyDecayHorizon: int = None,
     nStepsPerUpdate: int = 512,
     ppo_epochs: int = 4,
     clip_eps: float = 0.2,
@@ -184,26 +276,76 @@ def run_training(
     check_for_NaN_errors: bool = False,
     load_weights: bool = False,
     save_weights: bool = True,
-) -> tuple[int, int]:
+    target_hits: int = 100,
+    early_stop_patience: int = 0,
+    early_stop_min_updates: int = 500,
+    actor_weight_decay: float = 0.0,
+    critic_weight_decay: float = 0.0,
+    lstm_weight_decay: float = 0.0,
+    progress_callback: object = None,
+    progress_callback_interval: int = 1,
+) -> tuple[int, int, int]:
     """
     Runs the full PPO training loop (identical in behavior to the original
-    train.py script) with the given hyperparameters/settings, then runs 100
-    post-training eval episodes.
+    train.py script) with the given hyperparameters/settings, then runs
+    post-training eval episodes until `target_hits` episodes have reached
+    a target (see run_eval_until_target_hits for the stall-abort behavior).
 
     criticLrFloor and actorLrFloor are the linear-decay floors: criticLr
-    decays linearly to criticLrFloor over nUpdates (and the LSTM optimizer
-    shares this same schedule), while actorLr decays linearly to
-    actorLrFloor.
+    decays linearly to criticLrFloor over lrDecayHorizon, while actorLr
+    decays linearly to actorLrFloor. lstmLr/lstmLrFloor give the LSTM
+    optimizer its OWN independent learning rate and decay schedule,
+    rather than sharing the critic's (as it did previously) -- their
+    defaults (0.0003 / 3e-5) are exactly the critic's current defaults,
+    so leaving them unset reproduces the original shared-schedule
+    behavior exactly.
+
+    lrDecayHorizon and entropyDecayHorizon decouple "how many updates
+    does THIS run actually execute" (nUpdates) from "over how many
+    updates do the LR and entropy schedules unfold," respectively. Both
+    default to None, which falls back to nUpdates -- this is deliberately
+    a pure substitution, not a reshaped formula: the LR formulas still
+    ramp toward 0 (clamped at the floor, same as always) and the entropy
+    formula still has its original factor of 2 (reaching endEntropy at
+    HALF of entropyDecayHorizon, same as always) -- only the denominator
+    that used to be hardcoded to nUpdates is now independently settable.
+    This means the default (leaving both unset) reproduces the exact
+    original numeric behavior with no approximation: it's the same
+    formula with the same value substituted in, not a redesigned formula
+    that happens to land close to the old one. (An earlier version of
+    this parameter unified LR and entropy under one shared horizon with a
+    reshaped formula -- that version's default did NOT exactly reproduce
+    the original LR schedule, only the original entropy schedule, because
+    the two formulas had different implicit shapes to begin with. Keeping
+    them as two separate parameters, with the original formula shapes
+    untouched, avoids that mismatch entirely.)
+
+    These matter for a REDUCED-budget run meant to be a faithful PREFIX
+    of a longer intended run (e.g. a cheap hyperparameter search using
+    nUpdates=1000 to approximate the first 1000 updates of a real
+    nUpdates=5000 run): if the horizons were tied to nUpdates itself, a
+    reduced-budget run would anneal both LR and entropy proportionally
+    faster in absolute update-count terms than the real run it's meant to
+    approximate, so "this LR looked fine over 1000 updates" could
+    silently fail to transfer to "this LR is fine over 5000 updates,"
+    since the two runs were never actually on the same decay trajectory
+    to begin with. Setting lrDecayHorizon=entropyDecayHorizon=5000
+    explicitly while nUpdates stays at the reduced search budget makes
+    the reduced run's updates a true prefix of what the full run would
+    actually do.
 
     All of the original script's side effects are preserved
-    (eval_logs/returns.csv, eval_logs/eval_results.txt, the saved weights,
-    and the result1 plot). The only thing this function returns is:
+    (eval_logs/episode_info.csv, eval_logs/eval_results.txt, the saved weights,
+    and eval_logs/update_info.csv, read later by plot_returns.py to
+    produce training_plots.png -- this function itself does not plot
+    anything). The only thing this function returns is:
 
-        (left_count, right_count)
+        (left_count, right_count, miss_count)
 
-    i.e. how many of the 100 final eval episodes ended by reaching the left
-    target vs. the right target (episodes that timed out without hitting
-    either target are not counted in either number).
+    left_count + right_count will equal target_hits unless eval stalled
+    (see run_eval_until_target_hits) -- in that case it will be less, and
+    the caller should treat the run as inconclusive rather than a valid
+    left/right split.
 
     load_weights, if True, loads the existing weight files (actor/critic/
     lstm) into the agent right after it's constructed, before training
@@ -213,7 +355,56 @@ def run_training(
     save_weights, if True (the default), saves the trained actor/critic/
     lstm weights to disk at the end of the run, as the original script
     always did. If False, that save is skipped.
+
+    early_stop_patience, if > 0, enables early stopping: training tracks
+    the last early_stop_patience completed episode outcomes across ALL
+    envs combined -- hits AND misses alike -- and stops training early
+    (proceeding straight to the post-training eval, as if nUpdates had
+    been reached normally) once ALL of those outcomes are the exact same
+    target, with zero misses and zero hits to the other target anywhere
+    in that window. Misses are deliberately included rather than skipped:
+    a single miss slipping into an otherwise one-sided streak means the
+    policy hasn't fully collapsed to one deterministic path yet, so it
+    resets the streak rather than being ignored -- this makes the trigger
+    stricter/more conservative, only firing on genuine convergence rather
+    than "hasn't gone the other way recently." early_stop_min_updates is a
+    floor on how many updates must run first, so an early lucky streak
+    right at the start of training (before the policy has learned
+    anything real) can't trigger a spurious early stop. Disabled by
+    default (early_stop_patience=0) to preserve the original script's
+    behavior exactly when not explicitly opted into.
+
+    actor_weight_decay, critic_weight_decay, lstm_weight_decay: L2 weight
+    decay passed directly to each component's AdamW optimizer (the actor
+    and critic each get their own; the LSTM has always used its own
+    separate optimizer -- see lstm_optim -- so it gets its own decay
+    setting too, independent of the critic's, even though it currently
+    shares the critic's learning-rate schedule). All three default to 0.0,
+    exactly matching the original script's hardcoded weight_decay=0 on
+    every optimizer -- so leaving these unset changes nothing.
+
+    progress_callback, if given, is called every progress_callback_interval
+    updates as progress_callback(samplePhase, metrics), where metrics is a
+    dict with this update's critic_loss, actor_loss, entropy,
+    critic_grad_norm, actor_grad_norm, lstm_grad_norm (all floats -- the
+    same values written to update_info.csv this update), plus
+    left_count/right_count/miss_count (ints, tallied from THIS update's
+    finished episodes only). This exists so an external caller (e.g. an
+    Optuna objective function) can inspect training as it happens and
+    decide to abort early -- do this by raising optuna.TrialPruned() (or
+    any other exception) from inside the callback; it will propagate up
+    through run_training() uncaught, skipping the post-training eval and
+    weight-saving entirely (which is the point: a pruned trial shouldn't
+    pay for either). A normal (non-raising) callback has no effect on
+    training whatsoever -- it's called purely for its side effects on
+    whatever object owns it (e.g. accumulating history, calling
+    trial.report()), never using its return value.
     """
+    if lrDecayHorizon is None:
+        lrDecayHorizon = nUpdates
+    if entropyDecayHorizon is None:
+        entropyDecayHorizon = nUpdates
+
     if useCProfiler:
         profiler = cProfile.Profile()
         profiler.enable()
@@ -251,7 +442,11 @@ def run_training(
     lstmState = None
 
     agent = ActoCritic(obsShape, actionShape, device, criticLr, actorLr, nEnvs, 256, 2,
-                        validate_args_flag=validate_args_flag_param)
+                        validate_args_flag=validate_args_flag_param,
+                        actor_weight_decay=actor_weight_decay,
+                        critic_weight_decay=critic_weight_decay,
+                        lstm_weight_decay=lstm_weight_decay,
+                        lstm_lr=lstmLr)
 
     if load_weights:
         agent.actor.load_state_dict(torch.load(actor_weights_path))
@@ -260,13 +455,41 @@ def run_training(
 
     envWrapper = gym.wrappers.vector.RecordEpisodeStatistics(env, buffer_length=10000)
     os.makedirs("eval_logs", exist_ok=True)
-    with open("eval_logs/returns.csv", "w") as f:
-        f.write("update,return,target\n")
+    with open("eval_logs/episode_info.csv", "w") as f:
+        f.write("update,return,target,first_action\n")
+    with open("eval_logs/update_info.csv", "w") as f:
+        f.write("update,critic_loss,actor_loss,entropy,critic_grad_norm,actor_grad_norm,lstm_grad_norm\n")
+
     criticLosses = []
     actorLosses = []
     entropies = []
     current_max_steps = max_steps
     env.set_attr("max_steps", current_max_steps)
+
+    # Tracks, per env, the action taken on the first REAL step of that env's
+    # current (in-progress) episode.
+    #
+    # SyncVectorEnv's auto-reset is "next-step": when env i terminates during
+    # a .step() call, that env isn't actually reset until the FOLLOWING
+    # .step() call -- and whatever action is passed in for env i on that
+    # following call gets silently discarded so the wrapper can return the
+    # fresh reset observation instead. Debug output confirmed this: current_step
+    # for a just-terminated env stays flat (doesn't zero out) until one extra
+    # .step() call has passed.
+    #
+    # So there are two stages after a termination, not one:
+    #   awaitingReset[i]        -- next action for env i will be silently
+    #                              discarded while the env internally resets.
+    #   awaitingFirstAction[i]  -- env i has now actually reset; the NEXT
+    #                              action chosen is the real first move.
+    #
+    # The very first episode for each env (from the synchronous envWrapper.reset()
+    # call before the loop starts) doesn't go through this discard step, so
+    # awaitingFirstAction starts True and awaitingReset starts False.
+    firstActions = np.full(nEnvs, -1, dtype=np.int64)
+    awaitingReset = np.zeros(nEnvs, dtype=bool)
+    awaitingFirstAction = np.ones(nEnvs, dtype=bool)
+
     resetOptions = {
         "randomSpawn": False,
         "randomSize": False,
@@ -277,6 +500,13 @@ def run_training(
 
     _ = compute_gae(np.zeros((2, nEnvs), np.float32), np.ones((2, nEnvs), np.float32),
                     np.zeros((2, nEnvs), np.float32), gamma, lam, 2, nEnvs)
+
+    # Early-stop tracker: the most recent early_stop_patience completed
+    # (non-miss) episode outcomes, pooled across all envs. If they're all
+    # the same target once we're past early_stop_min_updates, the policy
+    # has clearly committed and training stops early.
+    recent_hit_targets = deque(maxlen=early_stop_patience) if early_stop_patience > 0 else None
+    early_stopped = False
 
     prof = torch.profiler.profile(
         activities=[torch.profiler.ProfilerActivity.CPU],
@@ -291,14 +521,16 @@ def run_training(
     critic_loss = actor_loss = train_entropy = None
 
     for samplePhase in tqdm(range(nUpdates)):
-        entropyBonus = max(endEntropy, beginEntropy - (samplePhase * 2 / nUpdates) * (beginEntropy - endEntropy))
-        lr = criticLr * (1 - samplePhase / nUpdates)
+        entropyBonus = max(endEntropy, beginEntropy - (samplePhase * 2 / entropyDecayHorizon) * (beginEntropy - endEntropy))
+        lr = criticLr * (1 - samplePhase / lrDecayHorizon)
         lr = max(lr, criticLrFloor)
         for param_group in agent.critic_optim.param_groups:
             param_group['lr'] = lr
+        lstmLr_current = lstmLr * (1 - samplePhase / lrDecayHorizon)
+        lstmLr_current = max(lstmLr_current, lstmLrFloor)
         for param_group in agent.lstm_optim.param_groups:
-            param_group['lr'] = lr
-        actorLr_current = actorLr * (1 - samplePhase / nUpdates)
+            param_group['lr'] = lstmLr_current
+        actorLr_current = actorLr * (1 - samplePhase / lrDecayHorizon)
         actorLr_current = max(actorLr_current, actorLrFloor)
         for param_group in agent.actor_optim.param_groups:
             param_group['lr'] = actorLr_current
@@ -326,15 +558,30 @@ def run_training(
 
         epInfos = []
         epTargetHits = {}
+        epFirstActions = {}
         for step in range(nStepsPerUpdate):
             actions, actionLogProbs, stateValuePreds, entropy, lstmState = agent.select_action(states, lstmState)
             epStates[step] = torch.as_tensor(states, dtype=torch.float32, device=cpu_device)
             epEntropies[step] = entropy
             epActions[step] = actions
+
+            actions_np = actions.numpy()
+            for i in range(nEnvs):
+                if awaitingReset[i]:
+                    # This action is about to be discarded internally by the
+                    # vector env's auto-reset -- NOT a real first move.
+                    awaitingReset[i] = False
+                    awaitingFirstAction[i] = True
+                elif awaitingFirstAction[i]:
+                    firstActions[i] = actions_np[i]
+                    awaitingFirstAction[i] = False
+
             states, rewards, terminated, truncated, infos = envWrapper.step(actions.numpy())
             for i, term in enumerate(terminated):
                 if term:
                     epTargetHits[(step, i)] = env.get_attr("last_target_hit")[i]
+                    epFirstActions[(step, i)] = int(firstActions[i])
+                    awaitingReset[i] = True
             epInfos.append(infos)
 
             dones_list = [term or trunc for term, trunc in zip(terminated, truncated)]
@@ -376,7 +623,7 @@ def run_training(
                         epActions, clip_eps,
                         initialLstmState
                     )
-                    agent.update_parameters(critic_loss, actor_loss)
+                    critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
         else:
             for _ in range(ppo_epochs):
                 if useTorchProfiler and samplePhase < 3:
@@ -387,7 +634,7 @@ def run_training(
                             epActions, clip_eps,
                             initialLstmState
                         )
-                        agent.update_parameters(critic_loss, actor_loss)
+                        critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
                 else:
                     critic_loss, actor_loss, train_entropy = agent.get_losses(
                         epStates, epRewards, epActionLogProbs, epValuePreds, epEntropies,
@@ -395,9 +642,9 @@ def run_training(
                         epActions, clip_eps,
                         initialLstmState
                     )
-                    agent.update_parameters(critic_loss, actor_loss)
+                    critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
 
-        with open("eval_logs/returns.csv", "a") as f:
+        with open("eval_logs/episode_info.csv", "a") as f:
             for step_idx, step_info in enumerate(epInfos):
                 if step_info is not None and "_episode" in step_info:
                     episode_mask = step_info["_episode"]
@@ -405,11 +652,48 @@ def run_training(
                     for i, finished in enumerate(episode_mask):
                         if finished:
                             target = epTargetHits.get((step_idx, i), -1)
-                            f.write(f"{samplePhase},{episode_returns[i]},{target}\n")
+                            first_action = epFirstActions.get((step_idx, i), -1)
+                            first_action_name = ACTION_NAMES.get(first_action, "none")
+                            f.write(f"{samplePhase},{episode_returns[i]},{target},{first_action_name}\n")
+                            if recent_hit_targets is not None:
+                                recent_hit_targets.append(target)
 
         criticLosses.append(critic_loss.detach().cpu().numpy())
         actorLosses.append(actor_loss.detach().cpu().numpy())
         entropies.append(train_entropy.detach().mean().cpu().numpy())
+
+        with open("eval_logs/update_info.csv", "a") as f:
+            f.write(f"{samplePhase},{float(criticLosses[-1])},{float(actorLosses[-1])},"
+                    f"{float(entropies[-1])},{critic_grad_norm},{actor_grad_norm},{lstm_grad_norm}\n")
+
+        if progress_callback is not None and (samplePhase % progress_callback_interval == 0):
+            this_update_left = sum(1 for v in epTargetHits.values() if v == 0)
+            this_update_right = sum(1 for v in epTargetHits.values() if v == 1)
+            this_update_miss = sum(1 for v in epTargetHits.values() if v == -1)
+            progress_callback(samplePhase, {
+                "critic_loss": float(criticLosses[-1]),
+                "actor_loss": float(actorLosses[-1]),
+                "entropy": float(entropies[-1]),
+                "critic_grad_norm": critic_grad_norm,
+                "actor_grad_norm": actor_grad_norm,
+                "lstm_grad_norm": lstm_grad_norm,
+                "left_count": this_update_left,
+                "right_count": this_update_right,
+                "miss_count": this_update_miss,
+            })
+
+        if (recent_hit_targets is not None
+                and samplePhase + 1 >= early_stop_min_updates
+                and len(recent_hit_targets) == early_stop_patience
+                and len(set(recent_hit_targets)) == 1
+                and recent_hit_targets[0] in (0, 1)):
+            committed_target = recent_hit_targets[0]
+            print(f"Early stopping at update {samplePhase + 1}/{nUpdates}: "
+                  f"last {early_stop_patience} hits all went to target "
+                  f"{committed_target} ({'left' if committed_target == 0 else 'right'}) "
+                  f"-- policy appears to have converged.")
+            early_stopped = True
+            break
 
         if samplePhase == 5 and (useCProfiler or useTorchProfiler):
             if prof:
@@ -432,94 +716,17 @@ def run_training(
     agent.critic.eval()
     agent.lstm.eval()
 
-    left_count = 0
-    right_count = 0
-    no_reward_count = 0
-
-    print("Running 100 post-training eval episodes...")
-    for eval_run in range(100):
-        evalEnv = MazeEnv(low, high, spawn, target_awards, target_coords,
-                          heatMapTypes=[], vision_range=1, use_ray_scans=False,
-                          step_penalty=step_penalty)
-        evalResetOptions = {
-            "randomSpawn": False,
-            "randomSize": False,
-            "randomTargetCoords": False,
-            "max_steps": 500
-        }
-        obs, info = evalEnv.reset(options=evalResetOptions)
-        done = False
-        lstmStateEval = None
-        terminated = False
-
-        with torch.no_grad():
-            while not done:
-                _, actionLogits, lstmStateEval = agent.forward(obs[None, :], lstmStateEval)
-                action = torch.argmax(actionLogits, dim=-1).item()
-                obs, reward, terminated, truncated, info = evalEnv.step(action)
-                done = terminated or truncated
-
-        if terminated:
-            if evalEnv.last_target_hit == 0:
-                left_count += 1
-            elif evalEnv.last_target_hit == 1:
-                right_count += 1
-            else:
-                no_reward_count += 1
-
-        evalEnv.close()
-
-    print(f"Left target: {left_count}, Right target: {right_count}, No reward: {no_reward_count}")
-
-    """ plot the results """
-    rolling_length = 20
-    fig, axs = plt.subplots(nrows=2, ncols=2, figsize=(12, 5))
-    fig.suptitle(
-        f"Training plots for {agent.__class__.__name__} \n \
-                (n_envs={nEnvs}, n_steps_per_update={nStepsPerUpdate})"
+    left_count, right_count, miss_count, total_episodes, stalled = run_eval_until_target_hits(
+        agent, low, high, spawn, target_awards, target_coords, step_penalty,
+        target_hits=target_hits,
     )
 
-    axs[0][0].set_title("Episode Returns")
-    episode_returns_moving_average = (
-        np.convolve(
-            np.array(envWrapper.return_queue).flatten(),
-            np.ones(rolling_length),
-            mode="valid",
-        )
-        / rolling_length
-    )
-    axs[0][0].plot(
-        np.arange(len(episode_returns_moving_average)) / nEnvs,
-        episode_returns_moving_average,
-    )
-    axs[0][0].set_xlabel("Number of episodes")
-
-    axs[1][0].set_title("Entropy")
-    entropy_moving_average = (
-        np.convolve(np.array(entropies), np.ones(rolling_length), mode="valid")
-        / rolling_length
-    )
-    axs[1][0].plot(entropy_moving_average)
-    axs[1][0].set_xlabel("Number of updates")
-
-    axs[0][1].set_title("Critic Loss")
-    critic_losses_moving_average = (
-        np.convolve(np.array(criticLosses).flatten(), np.ones(rolling_length), mode="valid")
-        / rolling_length
-    )
-    axs[0][1].plot(critic_losses_moving_average)
-    axs[0][1].set_xlabel("Number of updates")
-
-    axs[1][1].set_title("Actor Loss")
-    actor_losses_moving_average = (
-        np.convolve(np.array(actorLosses).flatten(), np.ones(rolling_length), mode="valid")
-        / rolling_length
-    )
-    axs[1][1].plot(actor_losses_moving_average)
-    axs[1][1].set_xlabel("Number of updates")
-
-    plt.tight_layout()
-    plt.savefig("result1")
+    if stalled:
+        print(f"WARNING: eval stalled after {total_episodes} episodes "
+              f"({left_count + right_count} hits, hit rate below the 10% "
+              f"floor) -- stopped early rather than continuing indefinitely.")
+    print(f"Left target: {left_count}, Right target: {right_count}, No reward: {miss_count} "
+          f"(over {total_episodes} episodes)")
 
     if save_weights:
         if not os.path.exists("weights"):
@@ -531,4 +738,4 @@ def run_training(
 
     env.close()
 
-    return left_count, right_count
+    return left_count, right_count, miss_count
