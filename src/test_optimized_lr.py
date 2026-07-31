@@ -46,7 +46,7 @@ if __name__ == "__main__":
         )
 
     RUN_KWARGS = dict(FIXED_KWARGS)
-    RUN_KWARGS["left_reward"] = 50
+    RUN_KWARGS["left_reward"] = 40
     
     for seed_idx in range(N_SEEDS):
             print(f"\n=== Seed {seed_idx + 1}/{N_SEEDS} "
