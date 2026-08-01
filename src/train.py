@@ -4,15 +4,15 @@ from run_training import run_training
 if __name__ == "__main__":
     left_count, right_count, miss_count = run_training(
         # core PPO / optimization hyperparameters
-        criticLr=6.4e-4,
-        actorLr=9.2e-5,
-        criticLrFloor=6.4e-5,
-        actorLrFloor=9.2e-6,
-        lstmLr=6.4e-4,
-        lstmLrFloor=6.4e-5,
-        nUpdates=2000,
-        lrDecayHorizon=1800,
-        entropyDecayHorizon=1800,
+        criticLr=0.0003,
+        actorLr=0.0001,
+        criticLrFloor=3e-5,
+        actorLrFloor=1e-5,
+        lstmLr=0.0003,
+        lstmLrFloor=3e-5,
+        nUpdates=5000,
+        lrDecayHorizon=5000,       # matches nUpdates -- exactly reproduces the original
+        entropyDecayHorizon=5000,  # LR/entropy decay behavior (see run_training.py docstring)
         nStepsPerUpdate=512,
         ppo_epochs=4,
         clip_eps=0.2,

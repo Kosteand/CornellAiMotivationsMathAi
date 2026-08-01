@@ -9,37 +9,42 @@ is what moves it and re-values it over time.
 
 Procedure (as specified for this branch):
 
-  1. Train at the current distance until, on a 50-update rolling window,
-     the agent hits SOME target 100% of the time (zero misses in the
-     window) AND the left/right split among those hits is in [49, 51]%
-     for the left target (equivalently the right target, since with zero
-     misses left% + right% == 100%).
-  2. Once that holds, move the left target one spot further from spawn
-     (distance += 1) and record the left_reward value that achieved the
-     50/50 split at the PREVIOUS distance.
-  3. After EVERY change (moving the target OR tweaking its reward value),
-     don't trust/act on the 50-update rolling window until at least 100
-     updates have passed since that change -- the window itself is only
-     50 wide, but the first 50 updates after any change may still contain
-     stale episodes finished under the old configuration, so we wait for
-     a full extra window's worth of buffer before reading it.
-  4. If the split has drifted, adjust left_reward using a "gallop, then
-     bisect" search: first nudge is 5% of the current value in the
-     direction that should pull the split back toward 50/50; if that
-     still undershoots, double the step and keep going (exponential
-     search) until the split crosses to the other side of 50%, then
-     binary-search between the two bracketing values. This deliberately
-     avoids a big first jump (which would waste time re-exploring), while
-     still converging quickly once a bracket is found.
-  5. If tuning at a given distance doesn't converge within
-     MAX_ATTEMPTS_PER_DISTANCE tries (noise, or a genuinely hard case),
-     give up gracefully: print a warning, fall back to whichever tried
-     value came closest to a 50/50 split, and move on to the next
-     distance anyway rather than stalling the whole experiment.
-  6. Repeat until the left target has been walked out to distance 25.
+  1. left_reward is continuously nudged, in effect at every distance, for
+     the entire run -- there is no separate search phase. Every single
+     time an episode ends by hitting the LEFT target, left_reward is
+     immediately decreased by REWARD_NUDGE_PCT percent; every single time
+     an episode ends by hitting the RIGHT target, left_reward is
+     immediately increased by REWARD_NUDGE_PCT percent. If several hits of
+     either kind land in the same update (multiple envs finishing at
+     once), the nudge is applied once per individual hit (compounding),
+     not once per update. This is a continuous online control loop, not a
+     discrete search -- there's no separate "tuning attempt," no gallop/
+     bisect, and no give-up/fallback: left_reward just keeps drifting
+     toward whatever value balances the split, for as long as training
+     runs, at every distance. It's clamped to [LEFT_REWARD_FLOOR,
+     LEFT_REWARD_CEILING] purely as a safety rail against the two
+     irreversible floating-point states (exact 0.0 and inf) a sustained
+     one-sided policy collapse could otherwise drive it into -- see the
+     comment above those constants for why that specifically happens.
+  2. Distance advances once, on the 50-update rolling window: (a) the
+     left/right split is in [MARGIN_LOW, MARGIN_HIGH]% (default
+     [49, 51]%), (b) the rolling hit rate (non-miss rate) is at least
+     REQUIRED_HIT_PCT percent (default 100 -- i.e. zero misses in the
+     window), AND (c) at least MOVES_BEFORE_DISTANCE_CHANGE updates (default
+     50) have passed since the distance last changed. Condition (c) exists
+     because the window is only 50 updates wide -- immediately after a
+     distance change, the window can still contain stale episodes that
+     finished under the OLD distance. Waiting MOVES_BEFORE_DISTANCE_CHANGE
+     updates (== WINDOW_SIZE) guarantees that by the time the window is
+     trusted, every entry in it postdates the change.
+  3. When distance advances, the left target moves one unit further from
+     spawn; left_reward is NOT reset -- whatever continuous value it has
+     drifted to carries over as the starting point for the new distance,
+     and the same continuous per-hit nudging keeps running unchanged.
+  4. Repeat until the left target has been walked out to distance 25.
 
-This script does NOT re-run training from scratch for each distance/value
--- it's all one continuous run_training() call. The map and reward are
+This script does NOT re-run training from scratch for each distance --
+it's all one continuous run_training() call. The map and reward are
 mutated mid-training via run_training's progress_callback hook (see that
 function's docstring in run_training.py): returning a dict of env
 attributes from the callback applies them to the live vector env via
@@ -69,40 +74,54 @@ START_DISTANCE = 5     # matches the map spec: left target starts at (95,5)
 END_DISTANCE = 25
 INITIAL_LEFT_REWARD = 10.0
 
-WINDOW_SIZE = 50                # "50-update rolling average"
-MOVES_BEFORE_TRUST = 100        # don't read/act on the window until this
-                                 # many updates have passed since the last
-                                 # change (distance move OR value tweak)
+WINDOW_SIZE = 50                     # "50-update rolling average"
+MOVES_BEFORE_DISTANCE_CHANGE = 50    # don't advance distance until this many
+                                      # updates have passed since the last
+                                      # distance change (NOT gated by reward
+                                      # nudges -- those apply continuously
+                                      # regardless of this counter)
 MARGIN_LOW, MARGIN_HIGH = 49, 51
 
-FIRST_STEP_FRACTION = 0.05      # first nudge after any change = 5% of value
-MAX_ATTEMPTS_PER_DISTANCE = 20
-LEFT_REWARD_FLOOR = 0.1
+# How much left_reward moves, in percent, on EVERY individual left-target
+# hit (decrease) or right-target hit (increase). E.g. 0.05 means each hit
+# multiplies left_reward by (1 - 0.05/100) or (1 + 0.05/100). Modify this
+# to change how fast left_reward reacts to the current split.
+REWARD_NUDGE_PCT = 0.05
+
+# Safety bounds only -- NOT meant to meaningfully constrain the value in
+# normal operation, just to keep it out of the two irreversible regions
+# the pure multiplicative nudge can otherwise drift into during a
+# sustained one-sided policy collapse:
+#   - LEFT_REWARD_FLOOR: without a floor, enough consecutive left-hit
+#     nudges compound left_value down until it underflows to exactly
+#     0.0 in floating point. Once that happens it's a dead state forever
+#     -- 0.0 * (1 +/- pct) is still 0.0, so no future nudge (in either
+#     direction) can ever move it again.
+#   - LEFT_REWARD_CEILING: the mirror-image problem on the other side --
+#     enough consecutive right-hit nudges compound left_value up until
+#     it overflows to inf, which is equally a dead state (inf * anything
+#     positive stays inf).
+# Both are set many orders of magnitude away from INITIAL_LEFT_REWARD
+# (10) so they never interfere with the actual reward-balancing dynamics
+# -- they only exist to stop left_value from ever reaching literal 0 or
+# inf.
+LEFT_REWARD_FLOOR = 1e-10
+LEFT_REWARD_CEILING = 1e10
+
+# Minimum rolling non-miss (hit) rate, in percent, required (alongside the
+# split being in range) before distance is allowed to advance. 100 means
+# zero misses anywhere in the current 50-update window. Modify this to
+# loosen/tighten the miss-rate bar for advancing.
+REQUIRED_HIT_PCT = 100.0
 
 RESULTS_CSV = "eval_logs/distance_reward_curriculum.csv"
-ATTEMPTS_CSV = "eval_logs/distance_reward_attempts.csv"
+REWARD_LOG_CSV = "eval_logs/distance_reward_nudges.csv"
 
 # Verbosity: a heartbeat status line (current distance/value/window) is
 # printed every HEARTBEAT_INTERVAL updates regardless of whether anything
 # changed, so a long stretch of training between changes still shows
-# progress instead of going silent. The "waiting on misses" state (split
-# already OK, just waiting for stale misses to clear the window) is
-# printed every WAIT_PRINT_INTERVAL checks rather than every single one,
-# since it can otherwise repeat every update for a long time.
+# progress instead of going silent.
 HEARTBEAT_INTERVAL = 250
-WAIT_PRINT_INTERVAL = 10
-
-# Collapse/runaway guard: if the gallop phase doubles its step this many
-# times in a row without EVER crossing to the other side of 50/50, that's
-# not "the right value is just further away than expected" -- a step that
-# keeps doubling GALLOP_WARNING_DOUBLINGS times has already multiplied the
-# reward by 2**GALLOP_WARNING_DOUBLINGS (256x at the default of 8), and if
-# that still isn't enough to pull even one episode the other way, the
-# policy has most likely stopped exploring that action entirely (e.g. it
-# collapsed to a fully deterministic policy and there's no exploration
-# left to ever notice the reward changed). Printed once per distance so
-# it doesn't spam every subsequent doubling.
-GALLOP_WARNING_DOUBLINGS = 8
 
 # Entropy bonus: held flat (no decay) rather than annealed, since the task
 # itself keeps changing underneath the policy (distance/reward moves) --
@@ -110,8 +129,8 @@ GALLOP_WARNING_DOUBLINGS = 8
 # adapting. Set equal to disable decay entirely (see run_training's
 # entropy formula: begin == end makes the decay term zero regardless of
 # horizon). Tweak freely; these are read fresh each run.
-BEGIN_ENTROPY = 0.05
-END_ENTROPY = 0.05
+BEGIN_ENTROPY = 0.10 # !!!!!
+END_ENTROPY = 0.10
 
 # Learning rate: also held effectively flat, for the same reason as
 # entropy above (nUpdates=10_000_000 is just an unbounded-run placeholder,
@@ -120,11 +139,21 @@ END_ENTROPY = 0.05
 # to be set to).
 LR_DECAY_HORIZON = 1_000_000
 
+# Learning rates: 1/10th of run_training's own defaults (criticLr=0.0003,
+# actorLr=0.0001, lstmLr=0.0003), lowered after the policy repeatedly
+# diverged/collapsed to one side even with the reward-value floor/ceiling
+# in place. run_training's LR decay was flattened (no ramp-down at all --
+# see run_training.py), so these are effectively the exact LR used for
+# the entire run, not just a starting point.
+CRITIC_LR = 0.0003 / 10   # 3e-5
+ACTOR_LR = 0.0001 / 10    # 1e-5
+LSTM_LR = 0.0003 / 10     # 3e-5
+
 
 class CurriculumComplete(Exception):
     """Raised from on_update() once the left target has been walked all
-    the way out to END_DISTANCE (converged or given up on), to unwind out
-    of run_training()'s update loop. Caught in main() -- not an error."""
+    the way out to END_DISTANCE, to unwind out of run_training()'s update
+    loop. Caught in main() -- not an error."""
     pass
 
 
@@ -133,7 +162,8 @@ class DistanceRewardCurriculum:
     Stateful progress_callback for run_training(). Pass an instance's
     on_update method as progress_callback (with progress_callback_interval
     left at its default of 1 -- this needs every update to keep an
-    accurate rolling window).
+    accurate rolling window and to apply reward nudges as soon as hits
+    happen).
     """
 
     def __init__(self):
@@ -141,43 +171,23 @@ class DistanceRewardCurriculum:
         self.left_value = INITIAL_LEFT_REWARD
 
         self.window = deque(maxlen=WINDOW_SIZE)
-        self.moves_since_change = 0
-
-        # Gallop/bisect search state for the reward tuning at the CURRENT
-        # distance. Reset every time we advance to a new distance.
-        self.stage = "idle"        # "idle" -> "gallop" -> "bisect"
-        self.direction = None      # +1 (increasing helps) or -1 (decreasing helps)
-        self.step = None
-        self.under_value = None    # a left_value known to give left% < 49
-        self.over_value = None     # a left_value known to give left% > 51
-        self.attempts = 0
-        self.best_value = self.left_value
-        self.best_diff = float("inf")
-        self.best_left_pct = None
-        self.best_hit_pct = None
-
-        # See GALLOP_WARNING_DOUBLINGS above.
-        self.gallop_doublings = 0
-        self._gallop_warning_printed = False
+        self.moves_since_distance_change = 0
 
         # One entry per finished distance, in order -- this is what lets
         # main() print a full distance -> left_reward summary at the end
         # without having to re-read the CSV back in.
         self.results = []
 
-        # Counter for throttling the "waiting on misses" print (see
-        # WAIT_PRINT_INTERVAL above).
-        self._wait_print_count = 0
-
         os.makedirs("eval_logs", exist_ok=True)
         with open(RESULTS_CSV, "w") as f:
-            f.write("distance,left_x,left_reward,converged,attempts,final_left_pct,final_hit_pct\n")
-        with open(ATTEMPTS_CSV, "w") as f:
-            f.write("update,distance,left_value,left_pct,hit_pct,miss_count_in_window\n")
+            f.write("distance,left_x,left_reward,final_left_pct,final_hit_pct\n")
+        with open(REWARD_LOG_CSV, "w") as f:
+            f.write("update,distance,left_value,left_count,right_count,miss_count\n")
 
         print(f"[curriculum] starting at distance {self.distance} (left target at "
               f"x={self._left_x()}), left_reward={self.left_value:.4f}, right_reward="
-              f"{RIGHT_REWARD} fixed at x={RIGHT_X}. Target: distance {END_DISTANCE}.")
+              f"{RIGHT_REWARD} fixed at x={RIGHT_X}. Target: distance {END_DISTANCE}. "
+              f"reward_nudge_pct={REWARD_NUDGE_PCT}%, required_hit_pct={REQUIRED_HIT_PCT}%.")
 
     # -- helpers ----------------------------------------------------------
 
@@ -185,9 +195,15 @@ class DistanceRewardCurriculum:
         return SPAWN_X - self.distance
 
     def _env_updates(self):
+        # NOTE: these keys must match MazeEnv's ACTUAL attribute names
+        # (set in SpaceEnv.py's __init__ from its targetCords/targetAwards
+        # constructor params), not a generic/guessed name -- env.set_attr()
+        # just does setattr(sub_env, key, value), so a mismatched key
+        # silently creates an unused new attribute instead of updating
+        # anything step()/getObs() actually reads.
         return {
-            "target_coords": np.array([[self._left_x(), 5], [RIGHT_X, 5]]),
-            "target_awards": np.array([self.left_value, RIGHT_REWARD]),
+            "targetCords": np.array([[self._left_x(), 5], [RIGHT_X, 5]]),
+            "targetAwards": np.array([self.left_value, RIGHT_REWARD]),
         }
 
     def _window_counts(self):
@@ -207,181 +223,93 @@ class DistanceRewardCurriculum:
                 f"-> left%={left_pct:.2f} hit%={hit_pct:.2f}")
 
     def _print_heartbeat(self, samplePhase):
-        trust_state = ("trusted" if self.moves_since_change >= MOVES_BEFORE_TRUST
-                        else f"buffering ({self.moves_since_change}/{MOVES_BEFORE_TRUST})")
+        trust_state = ("trusted" if self.moves_since_distance_change >= MOVES_BEFORE_DISTANCE_CHANGE
+                        else f"buffering ({self.moves_since_distance_change}/{MOVES_BEFORE_DISTANCE_CHANGE})")
         if len(self.window) == 0:
             window_part = "window empty so far"
         else:
             window_part = self._window_str(*self._window_counts())
         print(f"[curriculum] update {samplePhase}: distance {self.distance} (x={self._left_x()}), "
-              f"left_reward={self.left_value:.4f}, stage={self.stage}, "
-              f"attempt {self.attempts}/{MAX_ATTEMPTS_PER_DISTANCE}, "
-              f"moves_since_change={self.moves_since_change} [{trust_state}] | {window_part}")
+              f"left_reward={self.left_value:.4f}, distance_trust={trust_state} | {window_part}")
 
     def _reset_for_new_distance(self):
         self.window.clear()
-        self.moves_since_change = 0
-        self.stage = "idle"
-        self.direction = None
-        self.step = None
-        self.under_value = None
-        self.over_value = None
-        self.attempts = 0
-        self.best_value = self.left_value
-        self.best_diff = float("inf")
-        self.best_left_pct = None
-        self.best_hit_pct = None
-        self._wait_print_count = 0
-        self.gallop_doublings = 0
-        self._gallop_warning_printed = False
+        self.moves_since_distance_change = 0
 
     # -- the callback itself ----------------------------------------------
 
     def on_update(self, samplePhase, metrics):
-        self.window.append((metrics["left_count"], metrics["right_count"], metrics["miss_count"]))
-        self.moves_since_change += 1
+        left_count = metrics["left_count"]
+        right_count = metrics["right_count"]
+        miss_count = metrics["miss_count"]
+
+        # -- continuous per-hit reward nudge, in effect at every distance,
+        # applied immediately (before the next update) as soon as hits are
+        # tallied this update. Compounds if multiple hits of either kind
+        # landed in the same update.
+        if left_count > 0:
+            self.left_value *= (1 - REWARD_NUDGE_PCT / 100) ** left_count
+        if right_count > 0:
+            self.left_value *= (1 + REWARD_NUDGE_PCT / 100) ** right_count
+        # Safety clamp only -- see LEFT_REWARD_FLOOR/LEFT_REWARD_CEILING
+        # above. Keeps left_value out of the irreversible 0/inf regions
+        # without meaningfully constraining normal operation.
+        self.left_value = min(max(self.left_value, LEFT_REWARD_FLOOR), LEFT_REWARD_CEILING)
+        value_changed = (left_count > 0 or right_count > 0)
+
+        # Logged every single update (like update_info.csv logs every
+        # update's loss/entropy), not just updates where left_value
+        # actually changed -- this is the continuous, always-on record of
+        # left_value alongside the update number, regardless of whether
+        # this particular update had any hits.
+        with open(REWARD_LOG_CSV, "a") as f:
+            f.write(f"{samplePhase},{self.distance},{self.left_value},"
+                    f"{left_count},{right_count},{miss_count}\n")
+
+        # -- rolling window / distance-advance bookkeeping
+        self.window.append((left_count, right_count, miss_count))
+        self.moves_since_distance_change += 1
 
         if HEARTBEAT_INTERVAL and samplePhase % HEARTBEAT_INTERVAL == 0:
             self._print_heartbeat(samplePhase)
 
-        if self.moves_since_change < MOVES_BEFORE_TRUST:
-            return None
+        if len(self.window) < WINDOW_SIZE:
+            return self._env_updates() if value_changed else None
 
         left_sum, right_sum, miss_sum, total = self._window_counts()
         if total == 0:
-            return None  # defensive only -- shouldn't happen this far in
+            return self._env_updates() if value_changed else None  # defensive only
 
         hits = left_sum + right_sum
         left_pct = (left_sum / hits * 100) if hits > 0 else 0.0
         hit_pct = hits / total * 100
-        hit_ok = (miss_sum == 0)
-        window_str = self._window_str(left_sum, right_sum, miss_sum, total)
-
-        with open(ATTEMPTS_CSV, "a") as f:
-            f.write(f"{samplePhase},{self.distance},{self.left_value},{left_pct:.3f},"
-                    f"{hit_pct:.3f},{miss_sum}\n")
-
-        diff = abs(left_pct - 50)
-        if diff < self.best_diff:
-            self.best_diff = diff
-            self.best_value = self.left_value
-            self.best_left_pct = left_pct
-            self.best_hit_pct = hit_pct
 
         split_ok = MARGIN_LOW <= left_pct <= MARGIN_HIGH
-        success = hit_ok and split_ok
+        hit_ok = hit_pct >= REQUIRED_HIT_PCT
+        distance_trusted = self.moves_since_distance_change >= MOVES_BEFORE_DISTANCE_CHANGE
 
-        if success:
+        if split_ok and hit_ok and distance_trusted:
+            window_str = self._window_str(left_sum, right_sum, miss_sum, total)
             print(f"[curriculum] update {samplePhase}: distance {self.distance} (x={self._left_x()}) "
-                  f"CONVERGED at left_reward={self.left_value:.4f} -- {window_str}")
-            return self._advance_distance(converged=True, left_pct=left_pct, hit_pct=hit_pct)
+                  f"READY TO ADVANCE at left_reward={self.left_value:.4f} -- {window_str}")
+            return self._advance_distance(left_pct=left_pct, hit_pct=hit_pct)
 
-        if split_ok and not hit_ok:
-            # The split already looks right -- the remaining misses just
-            # haven't cleared the window yet. This isn't something
-            # left_reward tuning can fix, so wait for more training rather
-            # than spending a search attempt on it.
-            self._wait_print_count += 1
-            if self._wait_print_count % WAIT_PRINT_INTERVAL == 1:
-                print(f"[curriculum] update {samplePhase}: distance {self.distance} (x={self._left_x()}) "
-                      f"split already OK at left_reward={self.left_value:.4f}, waiting for stale "
-                      f"misses to clear -- {window_str}")
-            return None
+        return self._env_updates() if value_changed else None
 
-        if self.attempts >= MAX_ATTEMPTS_PER_DISTANCE:
-            print(f"[curriculum] update {samplePhase}: distance {self.distance} (left target at "
-                  f"x={self._left_x()}): gave up after {self.attempts} tuning attempts without "
-                  f"landing in [{MARGIN_LOW}, {MARGIN_HIGH}]%. Last try: left_reward="
-                  f"{self.left_value:.4f} -- {window_str}. Falling back to the closest value "
-                  f"tried: left_reward={self.best_value:.4f} (left%={self.best_left_pct:.2f}, "
-                  f"hit%={self.best_hit_pct:.2f}). Moving on to the next distance anyway.")
-            self.left_value = self.best_value
-            return self._advance_distance(converged=False, left_pct=self.best_left_pct,
-                                           hit_pct=self.best_hit_pct)
-
-        old_value = self.left_value
-        old_stage = self.stage
-        self._tweak(left_pct)
-        self.attempts += 1
-        self.moves_since_change = 0
-        print(f"[curriculum] update {samplePhase}: distance {self.distance} (x={self._left_x()}) "
-              f"attempt {self.attempts}/{MAX_ATTEMPTS_PER_DISTANCE} [{old_stage}->{self.stage}] "
-              f"-- {window_str} | left_reward {old_value:.4f} -> {self.left_value:.4f}")
-        return self._env_updates()
-
-    def _tweak(self, left_pct):
-        """Advance the gallop/bisect search by one step given the latest
-        left_pct reading, updating self.left_value in place."""
-        need_direction = 1 if left_pct < MARGIN_LOW else -1  # +1 == increase left_value helps
-
-        if self.stage == "idle":
-            self.direction = need_direction
-            self.step = max(FIRST_STEP_FRACTION * self.left_value, 1e-6)
-            if self.direction > 0:
-                self.under_value = self.left_value
-            else:
-                self.over_value = self.left_value
-            self.stage = "gallop"
-            self.gallop_doublings = 0
-            new_value = self.left_value + self.direction * self.step
-
-        elif self.stage == "gallop":
-            crossed = (need_direction != self.direction)
-            if crossed:
-                if self.direction > 0:
-                    self.over_value = self.left_value
-                else:
-                    self.under_value = self.left_value
-                self.stage = "bisect"
-                new_value = (self.under_value + self.over_value) / 2
-            else:
-                if self.direction > 0:
-                    self.under_value = self.left_value
-                else:
-                    self.over_value = self.left_value
-                self.step *= 2
-                self.gallop_doublings += 1
-                new_value = self.left_value + self.direction * self.step
-
-                if (self.gallop_doublings >= GALLOP_WARNING_DOUBLINGS
-                        and not self._gallop_warning_printed):
-                    self._gallop_warning_printed = True
-                    growth = 2 ** self.gallop_doublings
-                    print(f"[curriculum] WARNING: distance {self.distance} -- the reward gallop "
-                          f"has doubled {self.gallop_doublings} times ({growth}x growth) without "
-                          f"EVER crossing 50/50. This is very unlikely to mean 'the right value "
-                          f"is just further away' -- it usually means the policy has stopped "
-                          f"exploring the other action entirely (e.g. it collapsed to a fully "
-                          f"deterministic policy) and no reward value will bring it back. Check "
-                          f"for a collapsed/deterministic policy (e.g. one side's episode count "
-                          f"exploding while the other stays at 0) before waiting out the "
-                          f"remaining attempts.")
-
-        else:  # bisect
-            if need_direction > 0:
-                self.under_value = self.left_value
-            else:
-                self.over_value = self.left_value
-            new_value = (self.under_value + self.over_value) / 2
-
-        self.left_value = max(new_value, LEFT_REWARD_FLOOR)
-
-    def _advance_distance(self, converged, left_pct, hit_pct):
+    def _advance_distance(self, left_pct, hit_pct):
         with open(RESULTS_CSV, "a") as f:
-            f.write(f"{self.distance},{self._left_x()},{self.left_value},{converged},"
-                    f"{self.attempts},{left_pct:.3f},{hit_pct:.3f}\n")
+            f.write(f"{self.distance},{self._left_x()},{self.left_value},"
+                    f"{left_pct:.3f},{hit_pct:.3f}\n")
         self.results.append({
             "distance": self.distance,
             "left_x": self._left_x(),
             "left_reward": self.left_value,
-            "converged": converged,
-            "attempts": self.attempts,
             "left_pct": left_pct,
             "hit_pct": hit_pct,
         })
         print(f"[curriculum] === distance {self.distance} (left target at x={self._left_x()}) "
-              f"DONE -> left_reward={self.left_value:.4f} (converged={converged}, "
-              f"attempts={self.attempts}, left%={left_pct:.2f}, hit%={hit_pct:.2f}) ===")
+              f"DONE -> left_reward={self.left_value:.4f} (left%={left_pct:.2f}, "
+              f"hit%={hit_pct:.2f}) ===")
 
         if self.distance >= END_DISTANCE:
             raise CurriculumComplete()
@@ -389,7 +317,8 @@ class DistanceRewardCurriculum:
         next_distance = self.distance + 1
         print(f"[curriculum] advancing to distance {next_distance} (left target moves from "
               f"x={self._left_x()} to x={SPAWN_X - next_distance}), carrying over "
-              f"left_reward={self.left_value:.4f} as the starting point for the new search.")
+              f"left_reward={self.left_value:.4f} -- the continuous nudge keeps running "
+              f"unchanged at the new distance.")
 
         self.distance = next_distance
         self._reset_for_new_distance()
@@ -402,6 +331,9 @@ def main():
         run_training(
             left_reward=INITIAL_LEFT_REWARD,
             right_reward=RIGHT_REWARD,
+            criticLr=CRITIC_LR,
+            actorLr=ACTOR_LR,
+            lstmLr=LSTM_LR,
             beginEntropy=BEGIN_ENTROPY,
             endEntropy=END_ENTROPY,
             lrDecayHorizon=LR_DECAY_HORIZON,
@@ -426,16 +358,11 @@ def main():
 
 def print_summary(results):
     """Final distance -> left_reward table, printed to the terminal so you
-    don't have to go open the CSV to see the answer. Also flags any
-    distance that only got there via the give-up/best-effort fallback
-    (converged=False) rather than a genuine 50/50 landing."""
-    print(f"{'distance':>8}  {'left_x':>6}  {'left_reward':>12}  {'converged':>9}  "
-          f"{'left%':>6}  {'hit%':>6}  {'attempts':>8}")
+    don't have to go open the CSV to see the answer."""
+    print(f"{'distance':>8}  {'left_x':>6}  {'left_reward':>12}  {'left%':>6}  {'hit%':>6}")
     for r in results:
-        flag = "" if r["converged"] else "  <-- gave up, best-effort value"
         print(f"{r['distance']:>8}  {r['left_x']:>6}  {r['left_reward']:>12.4f}  "
-              f"{str(r['converged']):>9}  {r['left_pct']:>6.2f}  {r['hit_pct']:>6.2f}  "
-              f"{r['attempts']:>8}{flag}")
+              f"{r['left_pct']:>6.2f}  {r['hit_pct']:>6.2f}")
 
 
 if __name__ == "__main__":

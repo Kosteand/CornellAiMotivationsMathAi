@@ -206,7 +206,7 @@ def run_eval_until_target_hits(agent, low, high, spawn, target_awards, target_co
 
     while left_count + right_count < target_hits:
         evalEnv = MazeEnv(low, high, spawn, target_awards, target_coords,
-                          heatMapTypes=[], vision_range=1, use_ray_scans=False,
+                          heatMapTypes=[], vision_range=1, use_ray_scans=True,
                           step_penalty=step_penalty)
         evalResetOptions = {
             "randomSpawn": False,
@@ -257,7 +257,7 @@ def run_training(
     nUpdates: int = 5000,
     lrDecayHorizon: int = None,
     entropyDecayHorizon: int = None,
-    nStepsPerUpdate: int = 512,
+    nStepsPerUpdate: int = 64,
     ppo_epochs: int = 4,
     clip_eps: float = 0.2,
     gamma: float = 0.99,
@@ -268,8 +268,8 @@ def run_training(
     step_penalty: float = 0.0,
     left_reward: float = 10,
     right_reward: float = 10,
-    max_steps: int = 500,
-    min_steps: int = 500,
+    max_steps: int = 50,
+    min_steps: int = 50,
     step_decay: int = 20,
     # run settings / debug flags
     useCProfiler: bool = False,
@@ -419,10 +419,16 @@ def run_training(
     function already does internally for max_steps ("Tightening the
     clock!" above). This is how a caller mutates the map/reward
     mid-training without restarting the agent, optimizer, or LSTM state:
-    e.g. returning {"target_coords": np.array([[94, 5], [105, 5]]),
-    "target_awards": np.array([12.0, 10.0])} moves the left target one
+    e.g. returning {"targetCords": np.array([[94, 5], [105, 5]]),
+    "targetAwards": np.array([12.0, 10.0])} moves the left target one
     step further out and updates both targets' reward values on the very
-    next update. Returning None (or any other falsy value) applies no
+    next update. IMPORTANT: the dict keys must match MazeEnv's ACTUAL
+    attribute names (targetCords/targetAwards, set in SpaceEnv.py's
+    __init__ from its constructor params of the same name) -- since
+    env.set_attr() just does setattr(sub_env, key, value), a mismatched
+    key (e.g. "target_coords") silently creates an unused new attribute
+    instead of updating anything step()/getObs() actually read.
+    Returning None (or any other falsy value) applies no
     changes, which is also what happens if progress_callback is left
     unset. A normal (non-raising) callback that doesn't need to change
     anything has no other effect on training -- it's called purely for
@@ -458,12 +464,24 @@ def run_training(
         def _init():
             heatMapTypes = []
             env = MazeEnv(low, high, spawn, target_awards, target_coords,
-                          heatMapTypes=heatMapTypes, vision_range=1, use_ray_scans=False,
+                          heatMapTypes=heatMapTypes, vision_range=1, use_ray_scans=True,
                           step_penalty=step_penalty)
             return env
         return _init
 
     nEnvs = 22
+    # PPO minibatching: each epoch, the nEnvs envs collected this rollout are
+    # shuffled and split into nMinibatches groups of minibatchSize envs each,
+    # and a separate gradient step is taken per minibatch -- rather than one
+    # gradient step per epoch on the full rollout. This only splits along the
+    # ENV dimension, never the time dimension, so each minibatch still gets
+    # the full nStepsPerUpdate-length sequence per env, which is required for
+    # the LSTM's recurrent state and for compute_gae's per-env GAE math to
+    # stay correct. nMinibatches=1 reproduces the original full-batch
+    # behavior exactly (one gradient step per epoch, on the whole rollout).
+    nMinibatches = 1
+    minibatchSize = nEnvs // nMinibatches
+    assert nEnvs % nMinibatches == 0, "nEnvs must be evenly divisible by nMinibatches"
     env = gym.vector.SyncVectorEnv([makeEnv() for _ in range(nEnvs)])
 
     obsShape = env.single_observation_space.shape[0]
@@ -645,35 +663,49 @@ def run_training(
         if initialLstmState is not None:
             initialLstmState = (initialLstmState[0].to(device), initialLstmState[1].to(device))
 
+        def _slice_lstm_state(state, idx):
+            if state is None:
+                return None
+            return (state[0][:, idx, :], state[1][:, idx, :])
+
         if check_for_NaN_errors:
             for _ in range(ppo_epochs):
-                with torch.autograd.detect_anomaly():
-                    critic_loss, actor_loss, train_entropy = agent.get_losses(
-                        epStates, epRewards, epActionLogProbs, epValuePreds, epEntropies,
-                        masks, gamma, lam, entropyBonus, device,
-                        epActions, clip_eps,
-                        initialLstmState
-                    )
-                    critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
-        else:
-            for _ in range(ppo_epochs):
-                if useTorchProfiler and samplePhase < 3:
-                    with torch.mps.profiler.profile(mode="interval", wait_until_completed=True):
+                envPerm = torch.randperm(nEnvs, device=device)
+                for mb in range(nMinibatches):
+                    idx = envPerm[mb * minibatchSize:(mb + 1) * minibatchSize]
+                    with torch.autograd.detect_anomaly():
                         critic_loss, actor_loss, train_entropy = agent.get_losses(
-                            epStates, epRewards, epActionLogProbs, epValuePreds, epEntropies,
-                            masks, gamma, lam, entropyBonus, device,
-                            epActions, clip_eps,
-                            initialLstmState
+                            epStates[:, idx, :], epRewards[:, idx], epActionLogProbs[:, idx],
+                            epValuePreds[:, idx], epEntropies[:, idx],
+                            masks[:, idx], gamma, lam, entropyBonus, device,
+                            epActions[:, idx], clip_eps,
+                            _slice_lstm_state(initialLstmState, idx)
                         )
                         critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
-                else:
-                    critic_loss, actor_loss, train_entropy = agent.get_losses(
-                        epStates, epRewards, epActionLogProbs, epValuePreds, epEntropies,
-                        masks, gamma, lam, entropyBonus, device,
-                        epActions, clip_eps,
-                        initialLstmState
-                    )
-                    critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
+        else:
+            for _ in range(ppo_epochs):
+                envPerm = torch.randperm(nEnvs, device=device)
+                for mb in range(nMinibatches):
+                    idx = envPerm[mb * minibatchSize:(mb + 1) * minibatchSize]
+                    if useTorchProfiler and samplePhase < 3:
+                        with torch.mps.profiler.profile(mode="interval", wait_until_completed=True):
+                            critic_loss, actor_loss, train_entropy = agent.get_losses(
+                                epStates[:, idx, :], epRewards[:, idx], epActionLogProbs[:, idx],
+                                epValuePreds[:, idx], epEntropies[:, idx],
+                                masks[:, idx], gamma, lam, entropyBonus, device,
+                                epActions[:, idx], clip_eps,
+                                _slice_lstm_state(initialLstmState, idx)
+                            )
+                            critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
+                    else:
+                        critic_loss, actor_loss, train_entropy = agent.get_losses(
+                            epStates[:, idx, :], epRewards[:, idx], epActionLogProbs[:, idx],
+                            epValuePreds[:, idx], epEntropies[:, idx],
+                            masks[:, idx], gamma, lam, entropyBonus, device,
+                            epActions[:, idx], clip_eps,
+                            _slice_lstm_state(initialLstmState, idx)
+                        )
+                        critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
 
         with open("eval_logs/episode_info.csv", "a") as f:
             for step_idx, step_info in enumerate(epInfos):
@@ -714,9 +746,10 @@ def run_training(
             })
             # See the progress_callback docstring above: a truthy dict return
             # value is applied to the live vector env attribute-by-attribute,
-            # e.g. {"target_coords": ..., "target_awards": ...} to move/
+            # e.g. {"targetCords": ..., "targetAwards": ...} to move/
             # re-value a target mid-run, exactly like max_steps is mutated
-            # above via env.set_attr.
+            # above via env.set_attr. The keys MUST match MazeEnv's real
+            # attribute names -- see the docstring warning above.
             if env_updates:
                 for attr_name, attr_value in env_updates.items():
                     env.set_attr(attr_name, attr_value)

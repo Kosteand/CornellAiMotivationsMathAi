@@ -1,5 +1,1 @@
-distance,left_x,left_reward,converged,attempts,final_left_pct,final_hit_pct
-5,95,10.0234375,False,20,50.000,76.213
-6,94,4115.122265625,False,20,0.015,99.984
-7,93,4115.122265625,False,20,0.000,100.000
-8,92,30246.148652343752,False,20,0.001,99.995
+distance,left_x,left_reward,final_left_pct,final_hit_pct
