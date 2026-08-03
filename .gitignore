@@ -7,3 +7,7 @@ src/eval_logs/eval_results.txt
 src/eval_logs/returns.csv
 src/eval_logs/returns_plot.png
 src/eval_logs/target_percentage_plot.png
+*.pyc
+*.pyo
+__pycache__/
+
