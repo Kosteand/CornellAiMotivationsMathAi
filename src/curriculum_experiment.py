@@ -64,28 +64,22 @@ import numpy as np
 from run_training import run_training
 
 
-# ---- Experiment configuration -----------------------------------------
+# =========================================================================
+# USER CONFIG -- everything you're likely to want to tune lives here.
+# =========================================================================
 
+# -- Map / task definition (this branch's experiment design) ------------
 SPAWN_X = 100
 RIGHT_X = 105
 RIGHT_REWARD = 10.0
-
-START_DISTANCE = 5     # matches the map spec: left target starts at (95,5)
+START_DISTANCE = 5        # matches the map spec: left target starts at (95,5)
 END_DISTANCE = 25
 INITIAL_LEFT_REWARD = 10.0
 
-WINDOW_SIZE = 50                     # "50-update rolling average"
-MOVES_BEFORE_DISTANCE_CHANGE = 50    # don't advance distance until this many
-                                      # updates have passed since the last
-                                      # distance change (NOT gated by reward
-                                      # nudges -- those apply continuously
-                                      # regardless of this counter)
-MARGIN_LOW, MARGIN_HIGH = 49, 51
-
+# -- Reward-nudge controller ---------------------------------------------
 # How much left_reward moves, in percent, on EVERY individual left-target
 # hit (decrease) or right-target hit (increase). E.g. 0.05 means each hit
-# multiplies left_reward by (1 - 0.05/100) or (1 + 0.05/100). Modify this
-# to change how fast left_reward reacts to the current split.
+# multiplies left_reward by (1 - 0.05/100) or (1 + 0.05/100).
 REWARD_NUDGE_PCT = 0.05
 
 # Safety bounds only -- NOT meant to meaningfully constrain the value in
@@ -108,46 +102,56 @@ REWARD_NUDGE_PCT = 0.05
 LEFT_REWARD_FLOOR = 1e-10
 LEFT_REWARD_CEILING = 1e10
 
+# -- Distance-advance requirement -----------------------------------------
 # Minimum rolling non-miss (hit) rate, in percent, required (alongside the
-# split being in range) before distance is allowed to advance. 100 means
-# zero misses anywhere in the current 50-update window. Modify this to
-# loosen/tighten the miss-rate bar for advancing.
-REQUIRED_HIT_PCT = 100.0
+# split being in range -- see MARGIN_LOW/MARGIN_HIGH below) before
+# distance is allowed to advance. 100 means zero misses anywhere in the
+# current 50-update window.
+REQUIRED_HIT_PCT = 30.0
 
-RESULTS_CSV = "eval_logs/distance_reward_curriculum.csv"
-REWARD_LOG_CSV = "eval_logs/distance_reward_nudges.csv"
-
-# Verbosity: a heartbeat status line (current distance/value/window) is
-# printed every HEARTBEAT_INTERVAL updates regardless of whether anything
-# changed, so a long stretch of training between changes still shows
-# progress instead of going silent.
-HEARTBEAT_INTERVAL = 250
-
+# -- Training hyperparameters ---------------------------------------------
 # Entropy bonus: held flat (no decay) rather than annealed, since the task
 # itself keeps changing underneath the policy (distance/reward moves) --
 # annealing exploration to near-zero would fight against needing to keep
-# adapting. Set equal to disable decay entirely (see run_training's
-# entropy formula: begin == end makes the decay term zero regardless of
-# horizon). Tweak freely; these are read fresh each run.
-BEGIN_ENTROPY = 0.10 # !!!!!
+# adapting. Set equal to disable decay entirely (begin == end makes
+# run_training's entropy decay term zero regardless of horizon).
+BEGIN_ENTROPY = 0.10
 END_ENTROPY = 0.10
 
-# Learning rate: also held effectively flat, for the same reason as
-# entropy above (nUpdates=10_000_000 is just an unbounded-run placeholder,
-# not a real decay horizon -- decoupling it from LR_DECAY_HORIZON makes
-# that intentional rather than an accident of how large nUpdates happens
-# to be set to).
-LR_DECAY_HORIZON = 1_000_000
-
-# Learning rates: 1/10th of run_training's own defaults (criticLr=0.0003,
-# actorLr=0.0001, lstmLr=0.0003), lowered after the policy repeatedly
-# diverged/collapsed to one side even with the reward-value floor/ceiling
-# in place. run_training's LR decay was flattened (no ramp-down at all --
-# see run_training.py), so these are effectively the exact LR used for
-# the entire run, not just a starting point.
+# Learning rates passed straight through to run_training (which no longer
+# decays LR at all -- see run_training.py -- so these are the exact LR
+# used for the entire run, not just a starting point). Lowered to 1/10th
+# of run_training's own defaults (0.0003 / 0.0001 / 0.0003) after the
+# policy repeatedly diverged/collapsed to one side even with the
+# reward-value floor/ceiling above in place.
 CRITIC_LR = 0.0003 / 10   # 3e-5
 ACTOR_LR = 0.0001 / 10    # 1e-5
 LSTM_LR = 0.0003 / 10     # 3e-5
+
+# -- Verbosity -------------------------------------------------------------
+# A heartbeat status line (current distance/value/window) is printed every
+# HEARTBEAT_INTERVAL updates regardless of whether anything changed, so a
+# long stretch of training between changes still shows progress instead of
+# going silent.
+HEARTBEAT_INTERVAL = 250
+
+
+# =========================================================================
+# Internal constants -- govern how the 50-update rolling window/trust
+# check works. Not meant to be casually tuned like the knobs above, but
+# kept as named constants (rather than magic numbers) for readability.
+# =========================================================================
+
+WINDOW_SIZE = 50                     # "50-update rolling average"
+MOVES_BEFORE_DISTANCE_CHANGE = 50    # don't advance distance until this many
+                                      # updates have passed since the last
+                                      # distance change (NOT gated by reward
+                                      # nudges -- those apply continuously
+                                      # regardless of this counter)
+MARGIN_LOW, MARGIN_HIGH = 45, 55
+
+RESULTS_CSV = "eval_logs/distance_reward_curriculum.csv"
+REWARD_LOG_CSV = "eval_logs/distance_reward_nudges.csv"
 
 
 class CurriculumComplete(Exception):
@@ -336,12 +340,6 @@ def main():
             lstmLr=LSTM_LR,
             beginEntropy=BEGIN_ENTROPY,
             endEntropy=END_ENTROPY,
-            lrDecayHorizon=LR_DECAY_HORIZON,
-            entropyDecayHorizon=LR_DECAY_HORIZON,  # moot since begin==end
-                                                     # entropy zeroes the
-                                                     # decay term anyway,
-                                                     # but set explicitly
-                                                     # for clarity
             nUpdates=10_000_000,       # effectively unbounded -- the
                                         # curriculum stops us via
                                         # CurriculumComplete once distance
