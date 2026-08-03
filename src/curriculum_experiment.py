@@ -78,9 +78,20 @@ INITIAL_LEFT_REWARD = 10.0
 
 # -- Reward-nudge controller ---------------------------------------------
 # How much left_reward moves, in percent, on EVERY individual left-target
-# hit (decrease) or right-target hit (increase). E.g. 0.05 means each hit
-# multiplies left_reward by (1 - 0.05/100) or (1 + 0.05/100).
-REWARD_NUDGE_PCT = 0.05
+# hit (decrease) or right-target hit (increase). E.g. 0.005 means each hit
+# multiplies left_reward by (1 - 0.005/100) or (1 + 0.005/100).
+#
+# Lowered 10x (from 0.05) after observing a sustained left/right
+# oscillation (limit cycle) once LR was cut to 1/10th (see CRITIC_LR/
+# ACTOR_LR/LSTM_LR below): the nudge was moving left_reward -- i.e.
+# moving the policy's target -- faster than the now-throttled policy
+# could adapt, so it kept fully collapsing to one side, getting pushed
+# back before it settled, and flipping to the other side, forever,
+# without ever reaching a stable near-100%-hit-rate policy on either
+# side. Slowing the nudge to roughly match the policy's now-slower
+# adaptation speed is meant to let it actually settle instead of
+# perpetually chasing a moving target.
+REWARD_NUDGE_PCT = 0.005
 
 # Safety bounds only -- NOT meant to meaningfully constrain the value in
 # normal operation, just to keep it out of the two irreversible regions
