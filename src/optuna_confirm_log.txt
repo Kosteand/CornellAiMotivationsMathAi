@@ -1,1 +1,0 @@
-No completed trials found in the study yet -- run run_optuna_search.py first (partial progress is fine).
