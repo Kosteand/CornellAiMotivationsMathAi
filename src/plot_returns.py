@@ -240,3 +240,64 @@ plt.tight_layout()
 os.makedirs("eval_logs", exist_ok=True)
 plt.savefig("eval_logs/training_plots.png")
 print("Saved to eval_logs/training_plots.png")
+
+# ---------------------------------------------------------
+# Plot 6: left_reward over training (curriculum_experiment.py only --
+# distance_reward_nudges.csv is written by DistanceRewardCurriculum.
+# on_update(), every single update, regardless of whether a hit happened
+# that update -- see curriculum_experiment.py). Skipped gracefully if that
+# file doesn't exist, e.g. when just running run_training.py directly
+# without the curriculum wrapper.
+# ---------------------------------------------------------
+nudge_log_path = "eval_logs/distance_reward_nudges.csv"
+if os.path.exists(nudge_log_path):
+    nudge_updates = []
+    nudge_distances = []
+    nudge_left_values = []
+
+    with open(nudge_log_path, "r") as f:
+        reader = csv.reader(f)
+        next(reader)  # skip header
+        for row in reader:
+            nudge_updates.append(int(row[0]))
+            nudge_distances.append(int(row[1]))
+            nudge_left_values.append(float(row[2]))
+
+    nudge_updates = np.array(nudge_updates)
+    nudge_distances = np.array(nudge_distances)
+    nudge_left_values = np.array(nudge_left_values)
+
+    plt.figure(figsize=(12, 5))
+    # left_reward is a pure multiplicative random walk (see
+    # curriculum_experiment.py's REWARD_NUDGE_PCT), so it can span many
+    # orders of magnitude -- a log y-axis is what actually shows its
+    # behavior; on a linear axis it either looks flat near 0 or flat near
+    # whatever its max happened to reach. Only switch to log scale if
+    # every value is positive (it always should be, given
+    # LEFT_REWARD_FLOOR > 0, but guard against a 0 or negative value
+    # breaking the whole plot if something upstream ever changes).
+    use_log = np.all(nudge_left_values > 0)
+    if use_log:
+        plt.yscale("log")
+    plt.plot(nudge_updates, nudge_left_values, color="tab:red", linewidth=1.5, label="left_reward")
+
+    # Mark each distance change with a vertical line, so you can see how
+    # left_reward's trajectory lines up with the curriculum advancing --
+    # e.g. whether it's still oscillating/settling right before a change,
+    # or was already stable well before advancing.
+    distance_change_updates = nudge_updates[1:][np.diff(nudge_distances) != 0]
+    for i, u in enumerate(distance_change_updates):
+        plt.axvline(x=u, color="gray", linestyle="--", alpha=0.4,
+                    label="distance change" if i == 0 else None)
+
+    plt.xlim(left=0)
+    plt.xlabel("Update")
+    plt.ylabel("left_reward" + (" (log scale)" if use_log else ""))
+    plt.title("left_reward Over Training")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("eval_logs/left_reward_plot.png")
+    print("Saved to eval_logs/left_reward_plot.png")
+else:
+    print(f"Skipped left_reward plot -- {nudge_log_path} not found "
+          f"(only written when curriculum_experiment.py is the one running training).")
