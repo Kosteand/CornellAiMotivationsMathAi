@@ -263,7 +263,7 @@ def run_training(
     beginEntropy: float = 0.15,
     endEntropy: float = 0.05,
     # environment / reward shaping
-    step_penalty: float = -0.1,
+    step_penalty: float = 0.0,
     left_reward: float = 1000,
     right_reward: float = 10,
     max_steps: int = 500,
@@ -432,7 +432,19 @@ def run_training(
             return env
         return _init
 
-    nEnvs = 22
+    nEnvs = 24
+    # PPO minibatching: each epoch, the nEnvs envs collected this rollout are
+    # shuffled and split into nMinibatches groups of minibatchSize envs each,
+    # and a separate gradient step is taken per minibatch -- rather than one
+    # gradient step per epoch on the full rollout. This only splits along the
+    # ENV dimension, never the time dimension, so each minibatch still gets
+    # the full nStepsPerUpdate-length sequence per env, which is required for
+    # the LSTM's recurrent state and for compute_gae's per-env GAE math to
+    # stay correct. With ppo_epochs=4 and nMinibatches=4, this is 16 gradient
+    # steps per rollout instead of 4.
+    nMinibatches = 4
+    minibatchSize = nEnvs // nMinibatches
+    assert nEnvs % nMinibatches == 0, "nEnvs must be evenly divisible by nMinibatches"
     env = gym.vector.SyncVectorEnv([makeEnv() for _ in range(nEnvs)])
 
     obsShape = env.single_observation_space.shape[0]
@@ -614,35 +626,49 @@ def run_training(
         if initialLstmState is not None:
             initialLstmState = (initialLstmState[0].to(device), initialLstmState[1].to(device))
 
+        def _slice_lstm_state(state, idx):
+            if state is None:
+                return None
+            return (state[0][:, idx, :], state[1][:, idx, :])
+
         if check_for_NaN_errors:
             for _ in range(ppo_epochs):
-                with torch.autograd.detect_anomaly():
-                    critic_loss, actor_loss, train_entropy = agent.get_losses(
-                        epStates, epRewards, epActionLogProbs, epValuePreds, epEntropies,
-                        masks, gamma, lam, entropyBonus, device,
-                        epActions, clip_eps,
-                        initialLstmState
-                    )
-                    critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
-        else:
-            for _ in range(ppo_epochs):
-                if useTorchProfiler and samplePhase < 3:
-                    with torch.mps.profiler.profile(mode="interval", wait_until_completed=True):
+                envPerm = torch.randperm(nEnvs, device=device)
+                for mb in range(nMinibatches):
+                    idx = envPerm[mb * minibatchSize:(mb + 1) * minibatchSize]
+                    with torch.autograd.detect_anomaly():
                         critic_loss, actor_loss, train_entropy = agent.get_losses(
-                            epStates, epRewards, epActionLogProbs, epValuePreds, epEntropies,
-                            masks, gamma, lam, entropyBonus, device,
-                            epActions, clip_eps,
-                            initialLstmState
+                            epStates[:, idx, :], epRewards[:, idx], epActionLogProbs[:, idx],
+                            epValuePreds[:, idx], epEntropies[:, idx],
+                            masks[:, idx], gamma, lam, entropyBonus, device,
+                            epActions[:, idx], clip_eps,
+                            _slice_lstm_state(initialLstmState, idx)
                         )
                         critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
-                else:
-                    critic_loss, actor_loss, train_entropy = agent.get_losses(
-                        epStates, epRewards, epActionLogProbs, epValuePreds, epEntropies,
-                        masks, gamma, lam, entropyBonus, device,
-                        epActions, clip_eps,
-                        initialLstmState
-                    )
-                    critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
+        else:
+            for _ in range(ppo_epochs):
+                envPerm = torch.randperm(nEnvs, device=device)
+                for mb in range(nMinibatches):
+                    idx = envPerm[mb * minibatchSize:(mb + 1) * minibatchSize]
+                    if useTorchProfiler and samplePhase < 3:
+                        with torch.mps.profiler.profile(mode="interval", wait_until_completed=True):
+                            critic_loss, actor_loss, train_entropy = agent.get_losses(
+                                epStates[:, idx, :], epRewards[:, idx], epActionLogProbs[:, idx],
+                                epValuePreds[:, idx], epEntropies[:, idx],
+                                masks[:, idx], gamma, lam, entropyBonus, device,
+                                epActions[:, idx], clip_eps,
+                                _slice_lstm_state(initialLstmState, idx)
+                            )
+                            critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
+                    else:
+                        critic_loss, actor_loss, train_entropy = agent.get_losses(
+                            epStates[:, idx, :], epRewards[:, idx], epActionLogProbs[:, idx],
+                            epValuePreds[:, idx], epEntropies[:, idx],
+                            masks[:, idx], gamma, lam, entropyBonus, device,
+                            epActions[:, idx], clip_eps,
+                            _slice_lstm_state(initialLstmState, idx)
+                        )
+                        critic_grad_norm, actor_grad_norm, lstm_grad_norm = agent.update_parameters(critic_loss, actor_loss)
 
         with open("eval_logs/episode_info.csv", "a") as f:
             for step_idx, step_info in enumerate(epInfos):
