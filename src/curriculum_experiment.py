@@ -91,7 +91,10 @@ INITIAL_LEFT_REWARD = 10.0
 # side. Slowing the nudge to roughly match the policy's now-slower
 # adaptation speed is meant to let it actually settle instead of
 # perpetually chasing a moving target.
-REWARD_NUDGE_PCT = 0.005
+CONTROLLER_P_GAIN = 1
+CONTROLLER_I_GAIN = 1
+CONTROLLER_D_GAIN = 0.1
+EMA_ALPHA = 0.04
 
 # Safety bounds only -- NOT meant to meaningfully constrain the value in
 # normal operation, just to keep it out of the two irreversible regions
@@ -126,8 +129,8 @@ REQUIRED_HIT_PCT = 30.0
 # annealing exploration to near-zero would fight against needing to keep
 # adapting. Set equal to disable decay entirely (begin == end makes
 # run_training's entropy decay term zero regardless of horizon).
-BEGIN_ENTROPY = 0.10
-END_ENTROPY = 0.10
+BEGIN_ENTROPY = 0.1#0.10
+END_ENTROPY = 0.1#0.10
 
 # Learning rates passed straight through to run_training (which no longer
 # decays LR at all -- see run_training.py -- so these are the exact LR
@@ -184,9 +187,12 @@ class DistanceRewardCurriculum:
     def __init__(self):
         self.distance = START_DISTANCE
         self.left_value = INITIAL_LEFT_REWARD
+        self.initial_left = INITIAL_LEFT_REWARD
 
         self.window = deque(maxlen=WINDOW_SIZE)
         self.moves_since_distance_change = 0
+        self.ema_integrator = 0.0
+        self.prev_error = 0.0
 
         # One entry per finished distance, in order -- this is what lets
         # main() print a full distance -> left_reward summary at the end
@@ -202,7 +208,7 @@ class DistanceRewardCurriculum:
         print(f"[curriculum] starting at distance {self.distance} (left target at "
               f"x={self._left_x()}), left_reward={self.left_value:.4f}, right_reward="
               f"{RIGHT_REWARD} fixed at x={RIGHT_X}. Target: distance {END_DISTANCE}. "
-              f"reward_nudge_pct={REWARD_NUDGE_PCT}%, required_hit_pct={REQUIRED_HIT_PCT}%.")
+              f"CONTROLLER_P_GAIN={CONTROLLER_P_GAIN}%, required_hit_pct={REQUIRED_HIT_PCT}%.")
 
     # -- helpers ----------------------------------------------------------
 
@@ -258,18 +264,23 @@ class DistanceRewardCurriculum:
         right_count = metrics["right_count"]
         miss_count = metrics["miss_count"]
 
-        # -- continuous per-hit reward nudge, in effect at every distance,
-        # applied immediately (before the next update) as soon as hits are
-        # tallied this update. Compounds if multiple hits of either kind
-        # landed in the same update.
-        if left_count > 0:
-            self.left_value *= (1 - REWARD_NUDGE_PCT / 100) ** left_count
-        if right_count > 0:
-            self.left_value *= (1 + REWARD_NUDGE_PCT / 100) ** right_count
+        # Smooth the left/right counts before computing the hit split.
+        # This EMA deliberately carries over when distance changes.
+        hits = left_count + right_count
+        if hits > 0:
+            logit_left = np.log((left_count + 0.5) / (right_count + 0.5))
+            P_error = -logit_left
+            self.ema_integrator = (1-EMA_ALPHA) * (self.ema_integrator+P_error)
+            I_error = self.ema_integrator
+            D_error = P_error-self.prev_error
+            self.prev_error = P_error
+            self.left_value = (self.initial_left)+(CONTROLLER_P_GAIN * P_error)
+            self.left_value += (CONTROLLER_I_GAIN * I_error)+(CONTROLLER_D_GAIN * D_error)
         # Safety clamp only -- see LEFT_REWARD_FLOOR/LEFT_REWARD_CEILING
         # above. Keeps left_value out of the irreversible 0/inf regions
         # without meaningfully constraining normal operation.
-        self.left_value = min(max(self.left_value, LEFT_REWARD_FLOOR), LEFT_REWARD_CEILING)
+        #self.left_value = min(max(self.left_value, LEFT_REWARD_FLOOR), LEFT_REWARD_CEILING)
+        self.left_value = max(self.left_value, 0)
         value_changed = (left_count > 0 or right_count > 0)
 
         # Logged every single update (like update_info.csv logs every

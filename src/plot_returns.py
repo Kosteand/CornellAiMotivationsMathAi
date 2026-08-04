@@ -268,17 +268,6 @@ if os.path.exists(nudge_log_path):
     nudge_left_values = np.array(nudge_left_values)
 
     plt.figure(figsize=(12, 5))
-    # left_reward is a pure multiplicative random walk (see
-    # curriculum_experiment.py's REWARD_NUDGE_PCT), so it can span many
-    # orders of magnitude -- a log y-axis is what actually shows its
-    # behavior; on a linear axis it either looks flat near 0 or flat near
-    # whatever its max happened to reach. Only switch to log scale if
-    # every value is positive (it always should be, given
-    # LEFT_REWARD_FLOOR > 0, but guard against a 0 or negative value
-    # breaking the whole plot if something upstream ever changes).
-    use_log = np.all(nudge_left_values > 0)
-    if use_log:
-        plt.yscale("log")
     plt.plot(nudge_updates, nudge_left_values, color="tab:red", linewidth=1.5, label="left_reward")
 
     # Mark each distance change with a vertical line, so you can see how
@@ -292,7 +281,7 @@ if os.path.exists(nudge_log_path):
 
     plt.xlim(left=0)
     plt.xlabel("Update")
-    plt.ylabel("left_reward" + (" (log scale)" if use_log else ""))
+    plt.ylabel("left_reward")
     plt.title("left_reward Over Training")
     plt.legend()
     plt.tight_layout()

@@ -10,4 +10,5 @@ src/eval_logs/target_percentage_plot.png
 *.pyc
 *.pyo
 __pycache__/
-
+.venv
+eval_logs/
