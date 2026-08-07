@@ -904,4 +904,4 @@ systematicCrossoverSweep(_small_pairs, n_points=4, repeats=3)
 
 
 target_awards = [12,12]
-trainAgent([_targetPoly(7)])
+trainAgent([_targetPoly(8)])
