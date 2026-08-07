@@ -65,16 +65,17 @@ from Utilities.MultiHeatMap import MultiPolynomialInverse
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 MAX_N = 10                   # fixed input width every run pads up to (the ZeroMap-equivalent
-                            # dummy-map technique from experiment2.py): the MLP always sees
-                            # MAX_N channels, real ones for N and always-0 padding for the rest,
-                            # so in_dim never changes across the sweep -- isolates decodability
-                            # from capacity, exactly like padding SpaceEnv configs with ZeroMap.
-N_VALUES = [1,2,3,4,5,6,7,8,9,10]    # sweep N (max polynomial power/degree) -- restricted to the top
-                            # end of the 1..MAX_N range, where the earlier full sweep showed
-                            # val R^2 starting to slip (0.9868 -> 0.9683 for N=7..10). THIS is
-                            # the difficulty knob: higher max power -> higher-degree roots to
-                            # invert -> less linearly approximable, so the linear probe drops
-                            # (N=2: 0.96, 3: 0.87, 5: 0.75, 12: 0.67) while the exact decode holds.
+                            # dummy-map technique from experiment2.py). Set to 10 == N_VALUES
+                            # (no padding) so in_dim exactly matches the real agent's obs_shape
+                            # for trainAgent([_targetPoly(10)]) in experiment2.py -- a single
+                            # N=10 map has no ZeroMap padding in the real run either.
+N_VALUES = [10]              # oracle confirmation check for the N=10 run: N=7 decoded ~perfectly
+                            # (R^2=0.9908, 100% exact-class acc at the real 0-3 action range) --
+                            # does the SAME architecture (HIDDEN_DIM below, matching that run's
+                            # MLPh128x3) still decode cleanly at N=10, or has raising N pushed
+                            # decode SNR down enough to be a real ceiling? (Earlier full sweep on
+                            # the LINEAR probe only: N=2: 0.96, 3: 0.87, 5: 0.75, 12: 0.67 R^2 --
+                            # the genuine nonlinear MLP decode held up through N=7; N=10 untested.)
 MIN_POWER = 1               # keep at 1. ALL of a run's real channels [1..N] must be exposed
                             # for the noise-cancellation decode (mean w=1, mean noise=0 over
                             # N channels); difficulty comes from the MAX power N, not from
@@ -83,7 +84,7 @@ DTYPE = np.float64          # np.float32 or np.float64 for channels + net. Raw f
                             # precision: float64's ~16 digits move the numerical wall from
                             # ~N=8 to ~N=16-18 (graceful decay after), so N stays genuinely
                             # harder as it grows -- the honest way to push N, no shortcuts.
-NOISE_SCALE = 20.0          # per-channel noise magnitude. Bigger noise degrades a shortcut that
+NOISE_SCALE = 2.0          # per-channel noise magnitude. Bigger noise degrades a shortcut that
                             # only reads a FEW channels (mean(noise)=0 only cancels across the
                             # FULL N-channel set, so a subset sees an uncanceled residual that
                             # grows with noise) -- while the FULL linear probe and the exact
@@ -95,7 +96,7 @@ PARTIAL_PROBE_CHANNELS = 3  # how many of the N real channels the "partial short
                             # to see (min(this, N) if N is smaller). This is the metric that
                             # should get WORSE as NOISE_SCALE grows, unlike the full probe.
 TORCH_DTYPE = torch.float64 if DTYPE is np.float64 else torch.float32
-LO, HI = 0.0, 20.0          # range the oracle draws numbers from
+LO, HI = 0.0, 10.0          # range the oracle draws numbers from
 INTEGER = False             # False: continuous oracle -> real generalization to unseen
                             # values. True: integer oracle (also prints exact-int acc).
 N_SAMPLES = 20000           # how many numbers the oracle emits
@@ -107,7 +108,8 @@ REGEN_EVERY = 1             # regenerate the polynomial every this many inputs. 
                             # Set >= N_SAMPLES for one fixed polynomial (linear-decodable).
 
 # Training
-HIDDEN_DIM = 512   # same width as the PPO actor (see experiment2.py)
+HIDDEN_DIM = 128   # matches the specific RL run being checked (MLPh128x3 in experiment2.py's
+                    # current hyperparameter tag) -- was 512, generalized from an earlier test
 LR = 1e-3                   # constant, no annealing: an LR schedule was tried and reliably
                             # shrank |w| growth late in training without moving val R^2 at all
                             # (the oscillation it was meant to fix was only ~0.004 R^2 worth of
@@ -122,7 +124,7 @@ WEIGHT_DECAY = 9e-3        # meaningful is relative to STEP COUNT: cumulative pu
                             # which only gives ~3% pull-back at this length) without re-fighting
                             # real learning, since 3e-3 was already the value that didn't move
                             # R^2 in the earlier decay-vs-capacity test.
-EPOCHS = 5000
+EPOCHS = 1200
 BATCH_SIZE = 256
 VAL_FRAC = 0.2
 SEED = 0

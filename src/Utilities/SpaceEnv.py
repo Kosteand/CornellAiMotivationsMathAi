@@ -19,13 +19,19 @@ class MazeEnv(gym.Env):
     #targetCords: List of coords of each target
     #targetAwards: List of the awards of each 
     #*args: List of heatMaps (probably from HeatMap.py)
-    def __init__(self,lowerLeft: npt.NDArray[np.int_], upperRight: npt.NDArray[np.int_], 
+    def __init__(self,lowerLeft: npt.NDArray[np.int_], upperRight: npt.NDArray[np.int_],
                  spawn: npt.NDArray[np.int_],targetAwards: npt.NDArray[np.int_],
                  targetCords : npt.NDArray[np.int_], heatMapTypes:list,
-                 walls: np.ndarray | None = None):
+                 walls: np.ndarray | None = None, stepPenalty: float = -0.1,
+                 timeoutPenalty: float = -0.01):
         super(MazeEnv, self).__init__()
         self.heatMapTypes = heatMapTypes
+        self.stepPenalty = stepPenalty  # reward charged per non-terminal step (see step())
+        self.timeoutPenalty = timeoutPenalty  # reward charged on running out of max_steps
         self.max_steps = 1000  # Default starting limit decays
+        self.maxArenaSize = 101  # exclusive upper bound for randomSize -> max actual size 100
+                                  # (full "OG" 100x100 arena); overridable per-reset via
+                                  # resetOptions["maxArenaSize"], same pattern as max_steps.
         self.current_step = 0
         self.lowerLeft = np.array(lowerLeft)
         self.upperRight = np.array(upperRight)
@@ -166,14 +172,19 @@ class MazeEnv(gym.Env):
         randomSpawn = opts.get("randomSpawn", False)
         randomTargetCoords = opts.get("randomTargetCoords", False)
         self.max_steps = opts.get("max_steps", self.max_steps)
+        # Same pattern as max_steps: read from resetOptions if given, else keep whatever this
+        # env already had (persists across resets that don't explicitly override it) -- lets
+        # a curriculum drive this from the training loop by passing a growing value each
+        # update, same as it already does for max_steps.
+        self.maxArenaSize = opts.get("maxArenaSize", self.maxArenaSize)
         super().reset(seed=seed)
         self.current_step = 0
         if(randomSize):
             random_x = self.np_random.integers(-20, 20)
             random_y = self.np_random.integers(-20, 20)
-        
-            random_x_size = self.np_random.integers(10, 120)
-            random_y_size = self.np_random.integers(10,120)
+
+            random_x_size = self.np_random.integers(10, self.maxArenaSize)
+            random_y_size = self.np_random.integers(10, self.maxArenaSize)
             
             self.lowerLeft[0] = random_x
             self.lowerLeft[1] = random_y
@@ -344,7 +355,7 @@ class MazeEnv(gym.Env):
             # NOT a truncation. Truncation is reserved for the training loop's buffer
             # boundary; the env itself never truncates.
             terminated = True
-            reward = -0.01
+            reward = self.timeoutPenalty
             return self.getObs(), reward, terminated, truncated, {"targetHit":-1}
  
         direction = action
@@ -372,9 +383,9 @@ class MazeEnv(gym.Env):
         else:
             if not self._is_valid_position(self.coords):
                 self.coords = oldLoc
-                reward = -0.1
+                reward = self.stepPenalty
             else:
-                reward = -0.1
+                reward = self.stepPenalty
               
         truncated  = False
         return self.getObs(), reward, terminated, truncated, {"targetHit":targetHit,}

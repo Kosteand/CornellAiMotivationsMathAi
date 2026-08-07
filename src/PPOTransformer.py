@@ -4,37 +4,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.utils as torchutils
 import torch.distributions as distributions
+import torch.utils.data as data
+import math
 from dataclasses import dataclass
 import numpy as np
 
 class MLP(nn.Module):
-    NUM_HIDDEN_LAYERS = 3   # Layer1..Layer3; keep in sync with __init__/forward below
-
     def __init__(self, in_dim, hidden, out):
         super().__init__()
 
         self.Layer1 = nn.Linear(in_dim, hidden)
         self.Layer2 = nn.Linear(hidden, hidden)
-        self.Layer3 = nn.Linear(hidden, hidden)
-        self.Layer4 = nn.Linear(hidden, out)
+        self.Layer3 = nn.Linear(hidden, out)
         self.activation = nn.Tanh()
-
+    
     def forward(self, x):
         x = self.activation(self.Layer1(x))
         x = self.activation(self.Layer2(x))
-        x = self.activation(self.Layer3(x))
-        x = self.Layer4(x)
+        x = self.Layer3(x)
         return x
-
-    @classmethod
-    def describe(cls, hidden) -> str:
-        """Architecture summary for tagging saved weights/plots, e.g. 'MLPh64x3'. A
-        classmethod (needs only the intended hidden width, not a built instance) so callers
-        can fold it into a run label BEFORE constructing the agent -- a changed architecture
-        (this NUM_HIDDEN_LAYERS or hidden width) then gets a distinct label instead of
-        colliding with -- or being silently skipped in favor of -- an incompatible old
-        checkpoint saved under an earlier architecture."""
-        return f"MLPh{hidden}x{cls.NUM_HIDDEN_LAYERS}"
 
 
 class RolloutBuffer:
@@ -114,7 +102,7 @@ def EWMAUpdate(val, update, tau=0.01):
     if val is not None:
         return val*(1-tau) + tau*update
     else:
-        return update 
+        return update
 
 @dataclass
 class TrainStepResult:
@@ -129,7 +117,60 @@ class TrainStepResult:
         self.entropy = EWMAUpdate(self.entropy, entropy, tau)
 
 
-
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_model, num_heads):
+        super(MultiHeadAttention, self).__init__()
+        # Ensure that the model dimension (d_model) is divisible by the number of heads
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        
+        # Initialize dimensions
+        self.d_model = d_model # Model's dimension
+        self.num_heads = num_heads # Number of attention heads
+        self.d_k = d_model // num_heads # Dimension of each head's key, query, and value
+        
+        # Linear layers for transforming inputs
+        self.W_q = nn.Linear(d_model, d_model) # Query transformation
+        self.W_k = nn.Linear(d_model, d_model) # Key transformation
+        self.W_v = nn.Linear(d_model, d_model) # Value transformation
+        self.W_o = nn.Linear(d_model, d_model) # Output transformation
+        
+    def scaled_dot_product_attention(self, Q, K, V, mask=None):
+        # Calculate attention scores
+        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        
+        # Apply mask if provided (useful for preventing attention to certain parts like padding)
+        if mask is not None:
+            attn_scores = attn_scores.masked_fill(mask == 0, -1e9)
+        
+        # Softmax is applied to obtain attention probabilities
+        attn_probs = torch.softmax(attn_scores, dim=-1)
+        
+        # Multiply by values to obtain the final output
+        output = torch.matmul(attn_probs, V)
+        return output
+        
+    def split_heads(self, x):
+        # Reshape the input to have num_heads for multi-head attention
+        batch_size, seq_length, d_model = x.size()
+        return x.view(batch_size, seq_length, self.num_heads, self.d_k).transpose(1, 2)
+        
+    def combine_heads(self, x):
+        # Combine the multiple heads back to original shape
+        batch_size, _, seq_length, d_k = x.size()
+        return x.transpose(1, 2).contiguous().view(batch_size, seq_length, self.d_model)
+        
+    def forward(self, Q, K, V, mask=None):
+        # Apply linear transformations and split heads
+        Q = self.split_heads(self.W_q(Q))
+        K = self.split_heads(self.W_k(K))
+        V = self.split_heads(self.W_v(V))
+        
+        # Perform scaled dot-product attention
+        attn_output = self.scaled_dot_product_attention(Q, K, V, mask)
+        
+        # Combine heads and apply output transformation
+        output = self.W_o(self.combine_heads(attn_output))
+        return output
 
 class PPOAgent(nn.Module):
     def __init__(
@@ -145,7 +186,7 @@ class PPOAgent(nn.Module):
             epochs=8, 
             batch_size=64,
             eps=0.2,
-            ent_coeff=0.2,
+            ent_coeff=0.0,
             clipnorm = 1,
             gamma=0.99,
             gae_lambda=0.95,
@@ -160,7 +201,6 @@ class PPOAgent(nn.Module):
         # tensors run in self.dtype so that precision survives end to end.
         self.dtype = dtype
 
-        self.hidden_dim = hidden_dim
         self.actor = MLP(obs_dim, hidden_dim, out)
         self.critic = MLP(obs_dim, hidden_dim, 1)
 
@@ -182,31 +222,18 @@ class PPOAgent(nn.Module):
         self.to(device=device, dtype=self.dtype)   # cast all params to self.dtype + move
 
 
-    def describe(self) -> str:
-        """Architecture summary for tagging saved weights/plots (actor and critic share the
-        same MLP class + hidden width, so one descriptor covers both -- see MLP.describe)."""
-        return MLP.describe(self.hidden_dim)
-
     def forward(self, x):
         x = torch.as_tensor(x, dtype=self.dtype, device=self.device)
         logits = self.actor(x)
         values = self.critic(x)
         return logits, values.squeeze(-1)
     
-    def take_action(self, x, return_greedy=False):
+    def take_action(self, x):
         with torch.inference_mode():
             logits, values = self.forward(x)
             action_dist = distributions.Categorical(logits=logits)
             actions = action_dist.sample()
             log_probs = action_dist.log_prob(actions)
-        if return_greedy:
-            # argmax(logits): what the policy considers BEST, vs `actions` which is what it
-            # actually SAMPLED -- comparing the two per-step is a cheap way to measure how much
-            # of the rollout is genuine exploration noise (entropy floor never reaches 0) vs a
-            # confident, repeatable choice. Opt-in and defaults off so existing 3-tuple callers
-            # (e.g. experiment2Transformer.py) are unaffected.
-            greedy_actions = torch.argmax(logits, dim=-1)
-            return actions, log_probs, values, greedy_actions
         return actions, log_probs, values
     
     def train_step(
