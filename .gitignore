@@ -1,0 +1,10 @@
+# Trained models / weights (PPO .zip, A2C .h5, etc.)
+weights/
+
+# Generated images and data
+*.png
+*.csv
+
+# Python cache
+__pycache__/
+*.pyc
