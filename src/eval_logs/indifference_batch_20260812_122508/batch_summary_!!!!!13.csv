@@ -1,0 +1,6 @@
+k_fixed,k_variable,label,csv_path,M,beta,certified,status,error
+"('margin', 1)","('margin_scaled', 1, 0.1)",k_fixedmargin-1_k_variablemargin_scaled-1-0.1,eval_logs/indifference_batch_20260812_122508/k_fixedmargin-1_k_variablemargin_scaled-1-0.1_run_log.csv,2.2197461194059365,4.7355646638495665,True,ok,
+"('margin', 5)","('margin_scaled', 5, 0.1)",k_fixedmargin-5_k_variablemargin_scaled-5-0.1,eval_logs/indifference_batch_20260812_122508/k_fixedmargin-5_k_variablemargin_scaled-5-0.1_run_log.csv,1.7394369273553938,10.614834385781009,True,ok,
+"('margin', 25)","('margin_scaled', 1, 0.1)",k_fixedmargin-25_k_variablemargin_scaled-1-0.1,eval_logs/indifference_batch_20260812_122508/k_fixedmargin-25_k_variablemargin_scaled-1-0.1_run_log.csv,1.0270527965208363,21.82427717128302,True,ok,
+"('margin', 10)","('margin_scaled', 3, 0.1)",k_fixedmargin-10_k_variablemargin_scaled-3-0.1,eval_logs/indifference_batch_20260812_122508/k_fixedmargin-10_k_variablemargin_scaled-3-0.1_run_log.csv,1.4725134529930166,141.76970042200264,True,ok,
+"('margin_scaled', 1, 0.1)","('margin_scaled', 10, 0.1)",k_fixedmargin_scaled-1-0.1_k_variablemargin_scaled-10-0.1,eval_logs/indifference_batch_20260812_122508/k_fixedmargin_scaled-1-0.1_k_variablemargin_scaled-10-0.1_run_log.csv,1.5253243590182883,14.97652544207228,True,ok,

@@ -1,0 +1,6 @@
+k_fixed,k_variable,label,csv_path,M,beta,certified,status,error
+"('margin', 13)","('heatmap', 1.0, 3)",k_fixedmargin-13_k_variableheatmap-1.0-3,eval_logs/indifference_batch_20260811_192654/k_fixedmargin-13_k_variableheatmap-1.0-3_run_log.csv,0.33429120682133606,39.86874525200472,True,ok,
+"('margin', 1)","('margin', 30)",k_fixedmargin-1_k_variablemargin-30,eval_logs/indifference_batch_20260811_192654/k_fixedmargin-1_k_variablemargin-30_run_log.csv,2.0214436346092235,5.585716019956493,True,ok,
+"('margin', 25)","('heatmap', 0.0, 3)",k_fixedmargin-25_k_variableheatmap-0.0-3,eval_logs/indifference_batch_20260811_192654/k_fixedmargin-25_k_variableheatmap-0.0-3_run_log.csv,0.3984107034383011,32.88302377212533,True,ok,
+"('heatmap', 1.5, 3)","('heatmap', 4.0, 3)",k_fixedheatmap-1.5-3_k_variableheatmap-4.0-3,eval_logs/indifference_batch_20260811_192654/k_fixedheatmap-1.5-3_k_variableheatmap-4.0-3_run_log.csv,1.0154077172129656,10.503602647100667,True,ok,
+"('margin', 13)","('heatmap', 0.0, 6)",k_fixedmargin-13_k_variableheatmap-0.0-6,eval_logs/indifference_batch_20260811_192654/k_fixedmargin-13_k_variableheatmap-0.0-6_run_log.csv,0.322282670024542,55.366581260688584,True,ok,

@@ -1,0 +1,13 @@
+k_fixed,k_variable,label,csv_path,M,beta,certified,status,error
+1,2,k_fixed1_k_variable2,eval_logs/indifference_batch_20260810_011832/k_fixed1_k_variable2_run_log.csv,1.0299717639322616,79.66244462367285,True,ok,
+2,3,k_fixed2_k_variable3,eval_logs/indifference_batch_20260810_011832/k_fixed2_k_variable3_run_log.csv,1.0498731572965168,30.108603296111834,True,ok,
+3,5,k_fixed3_k_variable5,eval_logs/indifference_batch_20260810_011832/k_fixed3_k_variable5_run_log.csv,1.1350101314307959,35.24437152765032,True,ok,
+5,7,k_fixed5_k_variable7,eval_logs/indifference_batch_20260810_011832/k_fixed5_k_variable7_run_log.csv,1.102983878245002,38.796926445390575,True,ok,
+7,10,k_fixed7_k_variable10,eval_logs/indifference_batch_20260810_011832/k_fixed7_k_variable10_run_log.csv,1.1012492551671103,112.07447201528075,True,ok,
+10,13,k_fixed10_k_variable13,eval_logs/indifference_batch_20260810_011832/k_fixed10_k_variable13_run_log.csv,1.0704237476011573,38.9029663210021,True,ok,
+13,16,k_fixed13_k_variable16,eval_logs/indifference_batch_20260810_011832/k_fixed13_k_variable16_run_log.csv,1.0436842810439206,26.10811101897247,True,ok,
+16,20,k_fixed16_k_variable20,eval_logs/indifference_batch_20260810_011832/k_fixed16_k_variable20_run_log.csv,1.0433168187241038,25.70551840993829,True,ok,
+20,25,k_fixed20_k_variable25,eval_logs/indifference_batch_20260810_011832/k_fixed20_k_variable25_run_log.csv,1.0392263288258772,18.446930161686822,True,ok,
+1,5,k_fixed1_k_variable5,eval_logs/indifference_batch_20260810_011832/k_fixed1_k_variable5_run_log.csv,1.3261344000227577,7.534859359771521,True,ok,
+10,25,k_fixed10_k_variable25,eval_logs/indifference_batch_20260810_011832/k_fixed10_k_variable25_run_log.csv,1.1817479017667913,24.46105264173158,True,ok,
+3, 13, n/a, n/a, 1.4183872763465815, 11.594807831994297, True, ok,

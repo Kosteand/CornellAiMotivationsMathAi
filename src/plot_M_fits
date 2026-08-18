@@ -1,0 +1,1383 @@
+#!/usr/bin/env python3
+"""
+Fit and compare different functional shapes to log(M).
+Uses only OLS models (which have working AIC/BIC).
+
+2026-08-12: rewritten to source its data from Utilities.indifference_data /
+Utilities.weight_norm_data instead of a hand-maintained literal list. Every
+pair in indifference_data.csv that survived the hit-rate exclusion filter
+AND has weight_norm data on both sides is included automatically - no
+manual data-entry step needed when new run_indifference_batch.py results
+are folded in via Utilities.indifference_data.append_batch_summary_csv().
+
+NOTE: this drops the ~35 historical rows that predate spec-tracking (they
+were hardcoded directly into this file's old `data` list and are not
+recoverable from indifference_data.py, since their original group specs
+were never recorded) - everything from batch_summary_2.csv onward (every
+CSV that tags k_fixed/k_variable with an explicit group spec) is included.
+"""
+
+from collections import namedtuple
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+from patsy import bs
+from statsmodels.nonparametric.smoothers_lowess import lowess
+from statsmodels.stats.stattools import durbin_watson, omni_normtest, jarque_bera
+from scipy.optimize import curve_fit
+from scipy import stats
+
+from Utilities import indifference_data as idata
+from Utilities import weight_norm_data as wnd
+
+# ----------------------------------------------------------------------
+# 0. X-AXIS SELECTION - change X_COLUMN to fit/plot log(M) against a
+#    different ratio. Every label, print statement, and the
+#    tau-divergence filter below all derive from this one setting - no
+#    other edits needed to switch axes. Must be one of the columns
+#    Utilities.indifference_data.all_ratios() returns:
+#        "actor_ratio"   - actor network weight_norm ratio (variable/fixed)
+#        "layer2_ratio"  - policy_net.2 (64->32 hidden layer) weight_norm ratio
+#        "action_net_ratio" - output/action_net layer weight_norm ratio
+#        "total_ratio"   - total (actor+critic) weight_norm ratio
+#        "tau_ratio"     - fitted exponential learning-curve tau ratio
+#                          (noisy, prone to curve_fit divergence - see the
+#                          tau_diverged filter below, applied ONLY when
+#                          X_COLUMN == "tau_ratio")
+#        "avg_ratio"     - E[average entry in the group's observation proxy]
+#        "max_ratio"     - E[largest entry in the group's observation proxy]
+#        "sum_ratio"     - E[sum of entries in the group's observation proxy]
+X_COLUMN = "actor_ratio"
+
+_X_LABELS = {
+    "actor_ratio": "actor weight_norm ratio",
+    "layer2_ratio": "policy_net.2 (64->32 layer) weight_norm ratio",
+    "action_net_ratio": "action_net (output layer) weight_norm ratio",
+    "total_ratio": "total weight_norm ratio",
+    "tau_ratio": "fitted learning-curve tau ratio",
+    "avg_ratio": "E[average entry] magnitude ratio",
+    "max_ratio": "E[largest entry] magnitude ratio",
+    "sum_ratio": "E[sum of entries] magnitude ratio",
+}
+X_LABEL = _X_LABELS.get(X_COLUMN, X_COLUMN)
+
+# COLOR_HEATMAP_BY_TYPE: if True, "half-heatmap" pairs (exactly one side
+# is HeatmapGroup - a margin<->heatmap cross-type
+# comparison) are plotted dark blue, and "full-heatmap" pairs (BOTH sides
+# HeatmapGroup) are plotted light blue, instead of every point being the
+# same color. Non-heatmap (margin<->margin)
+# points stay black either way.
+COLOR_HEATMAP_BY_TYPE = True
+
+# FIT_EXCLUDE_ALL_HEATMAP: if True, every heatmap-involved pair - BOTH
+# half-heatmap (one side HeatmapGroup) AND full-heatmap (both sides
+# HeatmapGroup) - is dropped from the data the OLS models below are FIT
+# on; the fit only sees non-heatmap (margin<->margin) pairs. They are
+# still PLOTTED (as data points and in the
+# residuals panel) alongside the resulting curve, so you can see how well
+# a fit built without ANY heatmap involvement extrapolates to them.
+FIT_EXCLUDE_ALL_HEATMAP = True
+
+# RESIDUAL_X_COLUMN: what goes on the x-axis of the "Residuals vs ___"
+# panel (the right-hand plot in Section 7). "y_pred" (default) plots
+# residuals against the selected model's own fitted log(M) value - the
+# classic "residuals vs fitted" diagnostic. Set it to the name of any
+# ratio column instead (e.g. "max_ratio", "std_ratio", "layer2_ratio",
+# "actor_ratio", ... - anything Utilities.indifference_data.all_ratios()
+# returns) to plot residuals against log(that column) instead - useful
+# for checking whether the SELECTED model's residuals correlate with some
+# OTHER predictor besides the one it was actually fit on (e.g. does a
+# model fit on actor_ratio still have a pattern in its residuals when
+# viewed against max_ratio?). Does not change what the model is fit ON
+# (that's still X_COLUMN/section 2-2b) - only what this one diagnostic
+# panel plots residuals against.
+RESIDUAL_X_COLUMN = "y_pred"
+
+# CHECK_MAGNITUDE_PROXIES: if True, runs check_magnitude_proxies() (defined
+# below, right before the plot-building section) - a standalone check of
+# whether some OTHER single summary statistic of the group's observation
+# proxy predicts log(M) as well as (or better than) X_COLUMN. Tests six
+# candidate proxy-magnitude measures, all sourced from
+# Utilities.weight_norm_data.expected_magnitude(): E[average entry]
+# (avg_ratio), E[largest entry] (max_ratio), E[L1 norm] (l1_ratio),
+# E[L2 norm] (l2_ratio), E[RMS] (rms_ratio), E[standard deviation]
+# (std_ratio). Does nothing to the rest of the script either way - the
+# main X_COLUMN fit/plot above and below is unaffected by this flag.
+CHECK_MAGNITUDE_PROXIES = False
+
+# ACTOR_RATIO_OPTIONS: the weight-norm-based ratio columns this project
+# treats as alternatives to X_COLUMN for the "does magnitude add anything
+# on top of the actor-ratio-style predictor" check below - actor_ratio,
+# layer2_ratio, action_net_ratio, total_ratio. Deliberately excludes
+# tau_ratio (deprioritized/noisy - see the tau_diverged filter above) and
+# the magnitude ratios themselves (avg/max/l1/l2/rms/std_ratio - those are
+# the OTHER axis being tested, not something to run this check "on top
+# of"). Only consulted when CHECK_MAGNITUDE_ON_ALL_ACTOR_RATIOS is True.
+ACTOR_RATIO_OPTIONS = ["actor_ratio", "layer2_ratio", "action_net_ratio", "total_ratio"]
+
+# CHECK_MAGNITUDE_ON_ALL_ACTOR_RATIOS: if True (and CHECK_MAGNITUDE_PROXIES
+# is also True), the "augmented selected model" half of
+# check_magnitude_proxies runs once for EACH column in ACTOR_RATIO_OPTIONS
+# instead of just X_COLUMN - i.e. it checks whether each of the six
+# magnitude ratios adds anything on top of actor_ratio, then on top of
+# layer2_ratio, then action_net_ratio, then total_ratio in turn (all 4,
+# refitting the SAME best_name model shape from Section 3 on each column's
+# own log-values), and lists every one of those runs, rather than just the
+# single run against X_COLUMN. If False (default), only X_COLUMN is
+# checked, same as before this option existed.
+CHECK_MAGNITUDE_ON_ALL_ACTOR_RATIOS = False
+
+# CHECK_MAGNITUDE_ON_ALL_MODELS: if True (and CHECK_MAGNITUDE_PROXIES is
+# also True), the "augmented selected model" half of check_magnitude_proxies
+# runs once for EVERY model shape in `models` (Linear, Quadratic, Cubic,
+# Cubic (no x²), Tanh, Rational saturation, Shifted power, Linear+log) -
+# not just best_name, Section 3's AIC-ranked pick - refitting EACH shape
+# from scratch (base + all six magnitude-augmented variants) against
+# X_COLUMN (or, if CHECK_MAGNITUDE_ON_ALL_ACTOR_RATIOS is ALSO True, against
+# every column in ACTOR_RATIO_OPTIONS too - the two booleans are
+# independent/orthogonal and compose: model shapes × x-columns). If False
+# (default), only best_name is checked, same as before this option
+# existed.
+CHECK_MAGNITUDE_ON_ALL_MODELS = False
+
+# ----------------------------------------------------------------------
+# 1. Data: pulled live from Utilities.indifference_data.all_ratios(),
+#    which joins indifference_data.csv's (spec_fixed, spec_variable, M)
+#    rows against Utilities.weight_norm_data.csv's per-spec weight_norm/
+#    tau measurements and expected_magnitude()'s avg/max/sum ratios.
+# ----------------------------------------------------------------------
+RATIOS = idata.all_ratios(mc_kwargs={"samples": 500_000})
+df_large = pd.DataFrame(RATIOS)
+print(f"Loaded {len(df_large)} pairs from Utilities.indifference_data "
+      f"({df_large['is_heatmap'].sum()} heatmap-involved, "
+      f"{(~df_large['is_heatmap']).sum()} margin-only).")
+
+# tau_ratio specifically is known to be noisy and prone to a
+# curve_fit-divergence failure mode (fit_status="ok" but fit_tau wildly
+# wrong) - filtered out via the tau_diverged flag (same practical
+# r_squared<=0.5 threshold used throughout this project) ONLY when
+# X_COLUMN is actually tau_ratio; every other column (weight_norm ratios,
+# magnitude ratios) doesn't share this failure mode and isn't filtered.
+# Per direct instruction, tau is deprioritized generally (not planned for
+# use, "too noisy") but kept here for backward compatibility / possible
+# future use.
+if X_COLUMN == "tau_ratio":
+    df_tau = df_large[~df_large["tau_diverged"]].copy()
+    print(f"{len(df_large) - len(df_tau)} pairs dropped for diverged tau_ratio "
+          f"(kept for magnitude analysis below, just not the {X_COLUMN}-vs-logM fit).")
+else:
+    df_tau = df_large.copy()
+
+x = np.log(df_tau[X_COLUMN].astype(float))
+y = df_tau["logM"].astype(float)
+# df_plot carries every point that will be PLOTTED (all group-type flags
+# along for the ride, for coloring); df_fit is the (possibly smaller)
+# subset the OLS models are actually FIT on, per FIT_EXCLUDE_ALL_HEATMAP.
+df_plot = pd.DataFrame({
+    "x": x, "y_log": y,
+    "is_heatmap": df_tau["is_heatmap"].to_numpy(),
+    "is_full_heatmap": df_tau["is_full_heatmap"].to_numpy(),
+    "is_half_heatmap": df_tau["is_half_heatmap"].to_numpy(),
+})
+
+if FIT_EXCLUDE_ALL_HEATMAP:
+    df_fit = df_plot[~df_plot["is_heatmap"]].copy()
+    print(f"{len(df_plot) - len(df_fit)} heatmap-involved pairs (half + full) "
+          f"excluded from the fit (FIT_EXCLUDE_ALL_HEATMAP=True) - still "
+          f"plotted below.")
+else:
+    df_fit = df_plot.copy()
+
+# `df` is kept as the name the fit/residual code below operates on, so
+# only this cell needed to change to add the exclude-from-fit option.
+df = df_fit
+
+
+# ----------------------------------------------------------------------
+# 2. Fit different OLS models using the log-transformed target - every
+#    formula below has "- 1" appended to force the intercept to exactly 0.
+#    This is intentional, not just a style choice: on this log-log scale,
+#    x=0 (identical configs on both sides of a pair) MUST give y_log=0
+#    (M=1 exactly, since a config compared to itself is trivially
+#    indifferent) - a free intercept would let the model fit a nonzero
+#    log(M) at x=0, which is physically impossible for this data, so it's
+#    fixed at 0 rather than left for OLS to estimate.
+# ----------------------------------------------------------------------
+models = {}
+
+# Linear
+models['Linear'] = smf.ols('y_log ~ x - 1', data=df).fit()
+
+# Quadratic
+models['Quadratic'] = smf.ols('y_log ~ x + I(x**2) - 1', data=df).fit()
+
+# Cubic
+models['Cubic'] = smf.ols('y_log ~ x + I(x**3) - 1', data=df).fit()
+
+# Fit the simplified cubic (no quadratic term) - NOTE: same formula as
+# Cubic above (both omit the quadratic term); kept for naming continuity
+# with the model-comparison table's historical column labels.
+models['Cubic (no x²)'] = smf.ols('y_log ~ x + I(x**3) - 1', data=df).fit()
+
+# B‑spline with 4 degrees of freedom (lower than 5 to be safer)
+#models['Spline (df=4)'] = smf.ols('y_log ~ bs(x, df=4, degree=3)', data=df).fit()
+
+# ----------------------------------------------------------------------
+# 2b. Nonlinear (non-OLS) model shapes - can't be expressed as a
+#     linear-in-parameters patsy formula, so these are fit directly via
+#     scipy.optimize.curve_fit rather than statsmodels.ols, then wrapped
+#     in NonlinearFitResult below so they sit in the SAME `models` dict
+#     and go through the exact same comparison table / best-model
+#     selection / plotting / residual code as the OLS models above, with
+#     no special-casing needed downstream. All four pass through the
+#     origin (x=0 => y=0) by construction, matching this file's
+#     fixed-zero-intercept convention (see section 2's comment).
+# ----------------------------------------------------------------------
+
+def _tanh_model(x, a, b):
+    """log(M) = a * tanh(b * x) - saturating S-curve: log(M) -> +-a as
+    x -> +-infinity. Useful if the true relationship flattens out at
+    extreme ratios instead of growing without bound the way the OLS
+    polynomials above do."""
+    return a * np.tanh(b * x)
+
+
+def _rational_model(x, a, b):
+    """log(M) = a*x / (1 + b*|x|) - rational ("Michaelis-Menten style")
+    saturation: behaves linearly with slope a near x=0, and flattens
+    toward +-a/b as |x| grows, without tanh's hard S-curve shape."""
+    return a * x / (1 + b * np.abs(x))
+
+
+def _shifted_power_model(x, a, p):
+    """log(M) = sign(x) * a * ((1+|x|)^p - 1), with 0 < p < 1 enforced via
+    curve_fit bounds below - a sub-linear power law in the SHIFTED
+    magnitude (1+|x|) rather than a bare power of x itself, so it stays
+    well-defined (and antisymmetric, and exactly 0) at x=0."""
+    return np.sign(x) * a * ((1 + np.abs(x)) ** p - 1)
+
+
+def _linlog_model(x, a, b, c):
+    """log(M) = a*x + b*log(1 + c*x) - a linear term plus a logarithmic
+    correction. Uses np.log1p(c*x) (== log(1+c*x), but numerically stable
+    near c*x=0) - the `c` bound below (see _nonlinear_specs) keeps
+    1 + c*x > 0 across the actual data range so this never hits log's
+    domain error."""
+    return a * x + b * np.log1p(c * x)
+
+
+class NonlinearFitResult:
+    """Minimal stand-in for a statsmodels regression result. Implements
+    only what the comparison table / best-model selection / plotting /
+    residual code below actually calls on a fitted model - .aic, .bic,
+    .rsquared_adj, .predict(df), .summary() - computed with the SAME
+    Gaussian-log-likelihood convention statsmodels uses for OLS (see aic/
+    bic below), so its AIC/BIC are directly comparable to the OLS models'
+    values in the same table, and R^2/Adj-R^2 use the uncentered
+    (no-intercept) convention to match this file's forced-zero-intercept
+    OLS models."""
+
+    def __init__(self, name, func, param_names, x, y, p0, bounds=None, maxfev=20000):
+        self.name = name
+        self.func = func
+        self._param_names = param_names
+        self._x = np.asarray(x, dtype=float)
+        self._y = np.asarray(y, dtype=float)
+        popt, pcov = curve_fit(func, x, y, p0=p0, bounds=bounds or (-np.inf, np.inf), maxfev=maxfev)
+        self.popt = popt
+        self.pcov = pcov
+        self.params = dict(zip(param_names, popt))
+        resid = self._y - func(self._x, *popt)
+        self.resid = resid
+        self.nobs = len(y)
+        self.k_params = len(popt)
+        self.df_resid = self.nobs - self.k_params
+        self.rss = float(np.sum(resid ** 2))
+        sigma2 = max(self.rss / self.nobs, 1e-300)  # guard log(0) for a near-perfect fit
+        self.llf = -0.5 * self.nobs * (np.log(2 * np.pi) + np.log(sigma2) + 1)
+        self.aic = -2 * self.llf + 2 * self.k_params
+        self.bic = -2 * self.llf + self.k_params * np.log(self.nobs)
+        sst_uncentered = float(np.sum(self._y ** 2))
+        self.rsquared = 1 - self.rss / sst_uncentered if sst_uncentered > 0 else float('nan')
+        self.rsquared_adj = (1 - (1 - self.rsquared) * self.nobs / self.df_resid) if self.df_resid > 0 else float('nan')
+
+        # Parameter standard errors / t-stats / p-values / 95% CI - from
+        # curve_fit's own covariance matrix, same interpretation as an OLS
+        # coefficient table (asymptotic/large-sample approximation, since
+        # there's no exact finite-sample theory for a nonlinear model the
+        # way there is for OLS).
+        self.stderr = np.sqrt(np.clip(np.diag(pcov), 0, None))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            self.tvalues = np.where(self.stderr > 0, popt / self.stderr, np.nan)
+        self.pvalues = 2 * stats.t.sf(np.abs(self.tvalues), self.df_resid) if self.df_resid > 0 else np.full(self.k_params, np.nan)
+        _t_crit = stats.t.ppf(0.975, self.df_resid) if self.df_resid > 0 else np.nan
+        self.conf_int = np.column_stack([popt - _t_crit * self.stderr, popt + _t_crit * self.stderr])
+
+        # F-statistic (uncentered convention, matching the OLS models'
+        # "- 1"/no-intercept setup): ESS = SST_uncentered - RSS, same
+        # decomposition used for R^2 above.
+        ess = sst_uncentered - self.rss
+        if self.df_resid > 0 and self.k_params > 0:
+            self.fvalue = (ess / self.k_params) / (self.rss / self.df_resid)
+            self.f_pvalue = stats.f.sf(self.fvalue, self.k_params, self.df_resid)
+        else:
+            self.fvalue = self.f_pvalue = float('nan')
+
+        # Residual diagnostics - identical tests statsmodels prints in its
+        # OLS summary (Omnibus/normality, Jarque-Bera, Durbin-Watson).
+        try:
+            self.omnibus, self.omnibus_pvalue = omni_normtest(resid)
+        except Exception:
+            self.omnibus = self.omnibus_pvalue = float('nan')
+        try:
+            jb, jb_pvalue, jb_skew, jb_kurtosis = jarque_bera(resid)
+        except Exception:
+            jb, jb_pvalue, jb_skew, jb_kurtosis = (float('nan'),) * 4
+        self.jarque_bera = jb
+        self.jarque_bera_pvalue = jb_pvalue
+        self.skew = jb_skew
+        self.kurtosis = jb_kurtosis
+        self.durbin_watson = durbin_watson(resid)
+
+        # Condition number - statsmodels' analog for OLS uses the design
+        # matrix's eigenvalues; there's no fixed design matrix here, so
+        # this uses the parameter covariance matrix's eigenvalues instead
+        # (pcov ~ sigma^2 * inv(J'J), where J is the model's Jacobian at
+        # the optimum - same ill-conditioning signal, just via a
+        # nonlinear-least-squares-appropriate matrix).
+        try:
+            _eigs = np.linalg.eigvalsh(np.linalg.inv(pcov))
+            _eigs = _eigs[_eigs > 0]
+            self.cond_no = float(np.sqrt(_eigs.max() / _eigs.min())) if len(_eigs) else float('nan')
+        except np.linalg.LinAlgError:
+            self.cond_no = float('nan')
+
+    def predict(self, pred_df):
+        x_arr = pred_df['x'].to_numpy()
+        return pd.Series(self.func(x_arr, *[self.params[n] for n in self._param_names]), index=pred_df.index)
+
+    def summary(self):
+        """Statsmodels-OLS-style summary text (same information content:
+        fit-quality header block, per-parameter coefficient table with
+        std err/t/P>|t|/95% CI, and the residual-diagnostics block), built
+        by hand since statsmodels' own Summary class is tied to its own
+        model objects and can't be reused directly for a curve_fit result."""
+        name_w = max(len(n) for n in self._param_names)
+        lines = []
+        lines.append("=" * 87)
+        lines.append(f"{'Nonlinear Least Squares Results (' + self.name + ')':^87}")
+        lines.append("=" * 87)
+        # Fixed column widths (label, value) on each side, so alignment
+        # never breaks regardless of how long a model's name is - long
+        # values are truncated with "..." rather than pushed out of column.
+        _LEFT_LABEL_W, _LEFT_VAL_W = 18, 20
+        _RIGHT_LABEL_W, _RIGHT_VAL_W = 29, 16
+
+        def _fit(value, width):
+            value = str(value)
+            return value if len(value) <= width else value[:width - 3] + "..."
+
+        left = [
+            ("Dep. Variable:", "y_log"),
+            ("Model:", "Nonlinear"),
+            ("Method:", "curve_fit (NLS)"),
+            ("No. Observations:", str(self.nobs)),
+            ("Df Residuals:", str(self.df_resid)),
+            ("Df Model:", str(self.k_params)),
+        ]
+        right = [
+            ("R-squared (uncentered):", f"{self.rsquared:.3f}"),
+            ("Adj. R-squared (uncentered):", f"{self.rsquared_adj:.3f}"),
+            ("F-statistic:", f"{self.fvalue:.4g}"),
+            ("Prob (F-statistic):", f"{self.f_pvalue:.3g}"),
+            ("Log-Likelihood:", f"{self.llf:.3f}"),
+            ("AIC:", f"{self.aic:.2f}"),
+            ("BIC:", f"{self.bic:.2f}"),
+        ]
+        for i in range(max(len(left), len(right))):
+            if i < len(left):
+                l = f"{_fit(left[i][0], _LEFT_LABEL_W):<{_LEFT_LABEL_W}}{_fit(left[i][1], _LEFT_VAL_W):>{_LEFT_VAL_W}}"
+            else:
+                l = " " * (_LEFT_LABEL_W + _LEFT_VAL_W)
+            if i < len(right):
+                r = f"{_fit(right[i][0], _RIGHT_LABEL_W):<{_RIGHT_LABEL_W}}{_fit(right[i][1], _RIGHT_VAL_W):>{_RIGHT_VAL_W}}"
+            else:
+                r = ""
+            lines.append(f"{l}   {r}")
+        lines.append("=" * 87)
+        header = f"{'':<{name_w}} {'coef':>10} {'std err':>10} {'t':>8} {'P>|t|':>8} {'[0.025':>10} {'0.975]':>10}"
+        lines.append(header)
+        lines.append("-" * 87)
+        for i, pname in enumerate(self._param_names):
+            lines.append(
+                f"{pname:<{name_w}} {self.popt[i]:>10.4f} {self.stderr[i]:>10.4f} "
+                f"{self.tvalues[i]:>8.3f} {self.pvalues[i]:>8.3f} "
+                f"{self.conf_int[i, 0]:>10.4f} {self.conf_int[i, 1]:>10.4f}"
+            )
+        lines.append("=" * 87)
+        lines.append(
+            f"Omnibus: {self.omnibus:>16.3f}   Durbin-Watson: {self.durbin_watson:>17.3f}"
+        )
+        lines.append(
+            f"Prob(Omnibus): {self.omnibus_pvalue:>10.3f}   Jarque-Bera (JB): {self.jarque_bera:>14.3f}"
+        )
+        lines.append(
+            f"Skew: {self.skew:>19.3f}   Prob(JB): {self.jarque_bera_pvalue:>22.3g}"
+        )
+        lines.append(
+            f"Kurtosis: {self.kurtosis:>15.3f}   Cond. No.: {self.cond_no:>21.3g}"
+        )
+        lines.append("=" * 87)
+        lines.append("Notes:")
+        lines.append("[1] R2 is computed without centering (uncentered) since the model has no")
+        lines.append("    intercept term (this file forces every model through the origin).")
+        lines.append("[2] Standard errors are the asymptotic (large-sample) curve_fit covariance")
+        lines.append("    estimate - there is no exact finite-sample theory for a nonlinear model")
+        lines.append("    the way there is for OLS, so treat these as approximate.")
+        lines.append("[3] Cond. No. uses the parameter covariance matrix's eigenvalues (there is no")
+        lines.append("    fixed design matrix for a nonlinear model) - same ill-conditioning signal")
+        lines.append("    as OLS's Cond. No., computed differently.")
+        return "\n".join(lines)
+
+
+_x_arr = df['x'].to_numpy(dtype=float)
+_y_arr = df['y_log'].to_numpy(dtype=float)
+# Scale used to bound `c` in the linear+log model below, so 1+c*x can
+# never go non-positive across the actual data range (keeps log1p safe
+# during optimization, not just at the final fitted value).
+_x_scale = max(float(np.max(np.abs(_x_arr))), 1e-6) if len(_x_arr) else 1.0
+
+_nonlinear_specs = [
+    ("Tanh", _tanh_model, ['a', 'b'], [1.0, 1.0], None),
+    ("Rational saturation", _rational_model, ['a', 'b'], [1.0, 1.0],
+     ([-np.inf, 0.0], [np.inf, np.inf])),  # b>=0 so the denominator can't hit 0
+    ("Shifted power", _shifted_power_model, ['a', 'p'], [1.0, 0.5],
+     ([-np.inf, 1e-6], [np.inf, 1 - 1e-6])),  # enforces 0 < p < 1
+    ("Linear+log", _linlog_model, ['a', 'b', 'c'], [0.5, 0.5, 0.1],
+     ([-np.inf, -np.inf, -1.0 / (2 * _x_scale)], [np.inf, np.inf, 1.0 / (2 * _x_scale)])),
+]
+
+for _name, _func, _param_names, _p0, _bounds in _nonlinear_specs:
+    try:
+        models[_name] = NonlinearFitResult(_name, _func, _param_names, _x_arr, _y_arr, _p0, bounds=_bounds)
+    except (RuntimeError, ValueError) as _e:
+        print(f"WARNING: nonlinear fit '{_name}' failed to converge ({_e}) - excluded from comparison.")
+
+# ----------------------------------------------------------------------
+# Recipes for each of the 8 model shapes in `models` - term builders (for
+# the OLS-formula ones) and param_names/bounds lookups (for the
+# curve_fit-based ones), plus human-readable formula templates. Defined
+# here (before Section 3) so the model comparison table below can print
+# a fitted formula for every model, not just whichever one gets selected;
+# also reused by check_magnitude_proxies (section 6b) to augment the
+# selected model with an additive magnitude term.
+# ----------------------------------------------------------------------
+_OLS_MODEL_TERMS = {
+    "Linear": [("x", lambda x: x)],
+    "Quadratic": [("x", lambda x: x), ("x2", lambda x: x ** 2)],
+    "Cubic": [("x", lambda x: x), ("x3", lambda x: x ** 3)],
+    "Cubic (no x²)": [("x", lambda x: x), ("x3", lambda x: x ** 3)],
+}
+_NONLINEAR_LOOKUP = {spec[0]: spec for spec in _nonlinear_specs}
+
+# Human-readable formula templates for each model shape, given its fitted
+# base parameters IN THE SAME ORDER as _OLS_MODEL_TERMS/_NONLINEAR_LOOKUP's
+# param_names (a, b[, c/p]) - `x` in these strings always means
+# log(X_COLUMN) (or, in check_magnitude_proxies, log of whichever column
+# is being checked). Used only for printed reports; has no effect on any
+# fit itself.
+_BASE_FORMULA_TEMPLATES = {
+    "Linear": lambda p: f"{p[0]:.4f}*x",
+    "Quadratic": lambda p: f"{p[0]:.4f}*x + {p[1]:.4f}*x^2",
+    "Cubic": lambda p: f"{p[0]:.4f}*x + {p[1]:.4f}*x^3",
+    "Cubic (no x²)": lambda p: f"{p[0]:.4f}*x + {p[1]:.4f}*x^3",
+    "Tanh": lambda p: f"{p[0]:.4f}*tanh({p[1]:.4f}*x)",
+    "Rational saturation": lambda p: f"{p[0]:.4f}*x / (1 + {p[1]:.4f}*|x|)",
+    "Shifted power": lambda p: f"sign(x)*{p[0]:.4f}*((1+|x|)^{p[1]:.4f} - 1)",
+    "Linear+log": lambda p: f"{p[0]:.4f}*x + {p[1]:.4f}*log(1 + {p[2]:.4f}*x)",
+}
+
+
+def _param_names_for(best_name):
+    """Parameter names, in fitted-array order, for a model shape - the
+    same names _BASE_FORMULA_TEMPLATES' lambdas index into positionally."""
+    if best_name in _OLS_MODEL_TERMS:
+        return [name for name, _ in _OLS_MODEL_TERMS[best_name]]
+    if best_name in _NONLINEAR_LOOKUP:
+        return list(_NONLINEAR_LOOKUP[best_name][2])
+    raise ValueError(f"no param names for best_name={best_name!r}")
+
+
+def _model_coeffs_array(name, model):
+    """The fitted coefficients for an already-fit model (an smf.ols
+    result for the 4 OLS shapes, or a NonlinearFitResult for the 4
+    curve_fit shapes), as a plain array in the same order
+    _param_names_for/_BASE_FORMULA_TEMPLATES expect. Works for anything
+    already sitting in the `models` dict."""
+    if name in _OLS_MODEL_TERMS:
+        return np.asarray(model.params)
+    if name in _NONLINEAR_LOOKUP:
+        return np.asarray(model.popt)
+    raise ValueError(f"no coefficient recipe for model name={name!r}")
+
+
+def _format_model_formula(best_name, params, magnitude_col=None, q=None):
+    """'logM = <base formula>' (optionally with '+ q*log(<magnitude_col>)'
+    appended) using _BASE_FORMULA_TEMPLATES, falling back to a generic
+    listing if best_name isn't in the template dict (shouldn't happen for
+    any of this file's 8 model shapes)."""
+    template = _BASE_FORMULA_TEMPLATES.get(best_name)
+    if template is not None:
+        base_str = template(params)
+    else:
+        names = _param_names_for(best_name)
+        base_str = ", ".join(f"{n}={v:.4f}" for n, v in zip(names, params))
+    formula = f"logM = {base_str}"
+    if magnitude_col is not None:
+        formula += f" + ({q:.4f})*log({magnitude_col})"
+    return formula
+
+
+# ----------------------------------------------------------------------
+# 3. Model comparison (AIC, BIC, Adj R² all work for OLS) - printed
+#    ranked by AIC (rank 1 = lowest/best AIC), then YOU pick which model
+#    counts as "the" model for the rest of this script (plot, residuals,
+#    everything printed after) by entering its rank number. Press Enter
+#    with no input to accept the default (rank 1, i.e. lowest AIC). Every
+#    row also gets its fitted formula printed (coefficients filled in, via
+#    _model_coeffs_array/_format_model_formula above), not just whichever
+#    model ends up selected.
+# ----------------------------------------------------------------------
+print("=" * 80)
+print(f"MODEL COMPARISON (target = log(M), x = log({X_COLUMN}) = log({X_LABEL}))")
+print("=" * 80)
+_formulas = {
+    name: _format_model_formula(name, _model_coeffs_array(name, model))
+    for name, model in models.items()
+}
+comparison = pd.DataFrame({
+    'Model': list(models.keys()),
+    'AIC': [m.aic for m in models.values()],
+    'BIC': [m.bic for m in models.values()],
+    'Adj_R2': [m.rsquared_adj for m in models.values()],
+    'Formula': [_formulas[name] for name in models.keys()],
+}).sort_values('AIC').reset_index(drop=True)
+comparison.index = comparison.index + 1  # 1-based rank, matches the prompt below
+comparison.index.name = 'Rank (by AIC)'
+with pd.option_context("display.width", 220, "display.max_colwidth", None,
+                        "display.max_columns", None):
+    print(comparison)
+
+_n_models = len(comparison)
+_default_rank = 1  # lowest AIC
+_rank = _default_rank
+_raw = input(f"\nPick a model by its Rank (by AIC) above [1-{_n_models}], "
+             f"or press Enter for the default (rank {_default_rank}, lowest AIC): ").strip()
+if _raw:
+    try:
+        _parsed = int(_raw)
+        if 1 <= _parsed <= _n_models:
+            _rank = _parsed
+        else:
+            print(f"'{_raw}' is out of range (1-{_n_models}) - using the default, rank {_default_rank}.")
+    except ValueError:
+        print(f"'{_raw}' isn't a valid rank number - using the default, rank {_default_rank}.")
+
+best_name = comparison.loc[_rank, 'Model']
+best_model = models[best_name]
+print(f"\nSelected model: rank {_rank} by AIC -> {best_name}")
+print(best_model.summary())
+
+# ----------------------------------------------------------------------
+# 4. Predictions for smooth plotting - x_pred spans df_plot's full range
+#    (everything that gets PLOTTED), not just df_fit's (everything the
+#    model was actually FIT on), so the curve extends across any
+#    fit-excluded points too.
+# ----------------------------------------------------------------------
+x_pred = np.linspace(df_plot['x'].min(), df_plot['x'].max(), 200)
+pred_df = pd.DataFrame({'x': x_pred})
+
+
+def _point_colors(frame):
+    """Per-point colors for a df_plot-shaped frame: black for non-heatmap,
+    and - only when COLOR_HEATMAP_BY_TYPE is on - dark blue for
+    half-heatmap (one side HeatmapGroup) and light blue for full-heatmap
+    (both sides HeatmapGroup)."""
+    if not COLOR_HEATMAP_BY_TYPE:
+        return 'black'
+    return np.select(
+        [frame['is_full_heatmap'], frame['is_half_heatmap']],
+        ['skyblue', 'darkblue'],
+        default='black',
+    )
+
+
+def _residual_x_values(frame):
+    """Values (and an axis label) for the residuals plot's x-axis, per
+    RESIDUAL_X_COLUMN. 'y_pred' (default) uses the SELECTED model's own
+    fitted log(M) - the classic "residuals vs fitted" view. Any other
+    value is treated as a ratio column name (e.g. 'max_ratio') and
+    plotted as log(that column), looked up from df_tau (the full,
+    un-filtered-by-fit ratio data - same convention as X_COLUMN elsewhere
+    in this file) aligned to `frame`'s index, so this works for both
+    df_plot (every plotted point) and df (the fit-only subset)."""
+    if RESIDUAL_X_COLUMN == "y_pred":
+        return frame['y_pred'].to_numpy(), 'Fitted log(M)'
+    vals = np.log(df_tau.loc[frame.index, RESIDUAL_X_COLUMN].astype(float)).to_numpy()
+    return vals, f'log({RESIDUAL_X_COLUMN})'
+
+
+# ----------------------------------------------------------------------
+# 5. Compute predictions/residuals needed for both the printed diagnostics
+#    (section 6, below) and the plot (rendered at the very end of the
+#    script, after ALL text output, so the plot window never interleaves
+#    with or interrupts the printed sections that follow it).
+# ----------------------------------------------------------------------
+fit_note = ' (fit excludes all heatmap-involved points)' if FIT_EXCLUDE_ALL_HEATMAP else ''
+
+# Residuals vs. Fitted for the best model - computed for EVERY plotted
+# point (df_plot), including any excluded from the fit itself, so you can
+# see how well the fit extrapolates to them.
+df_plot['y_pred'] = best_model.predict(df_plot)
+df_plot['residual'] = df_plot['y_log'] - df_plot['y_pred']
+# df (== df_fit) keeps its own y_pred/residual too, since the printed
+# residual diagnostics in section 6 describe the FIT data specifically.
+df['y_pred'] = best_model.predict(df)
+df['residual'] = df['y_log'] - df['y_pred']
+
+# ----------------------------------------------------------------------
+# 6. Residual statistics
+# ----------------------------------------------------------------------
+print("\nResidual diagnostics for the best model:")
+print(f"Mean residual: {df['residual'].mean():.5f}")
+print(f"Std. deviation: {df['residual'].std():.5f}")
+print(f"Skewness: {df['residual'].skew():.3f}")
+print(f"Kurtosis: {df['residual'].kurtosis():.3f}")
+print(f"RMSE: {np.sqrt((df['residual']**2).mean()):.5f}")
+
+# ----------------------------------------------------------------------
+# 6b. Proxy-magnitude-statistics check - only runs if
+#     CHECK_MAGNITUDE_PROXIES is True (see the config block at the top of
+#     this file). Reads df_large (the raw, un-logged ratios straight from
+#     Utilities.indifference_data) plus best_name/best_model (Section 3's
+#     AIC-ranked selection) and prints a standalone report - doesn't
+#     modify df/df_plot/df_fit/models/best_model themselves, or anything
+#     below.
+# ----------------------------------------------------------------------
+
+def _fit_base_model(best_name, best_model, x, y):
+    """Refit the SELECTED model shape (best_name) FROM SCRATCH on (x, y) -
+    not reusing best_model's own fitted params, just its shape/bounds -
+    since this check needs the base model refit on exactly the rows this
+    check itself is using (the rows where ALL magnitude measures are
+    available), not whatever rows Section 3's original fit happened to
+    use. Returns (fit, predict_fn, params_array) where predict_fn takes an
+    array of x values and predict_fn is only ever called with the SAME
+    inputs the fit statistics below were computed from, or a held-out
+    array of x values for the generalization check."""
+    if best_name in _OLS_MODEL_TERMS:
+        terms = _OLS_MODEL_TERMS[best_name]
+        design = np.column_stack([f(x) for _, f in terms])
+        fit = sm.OLS(y, design).fit()
+
+        def predict(x_ho):
+            d = np.column_stack([f(x_ho) for _, f in terms])
+            return fit.predict(d)
+
+        return fit, predict, np.asarray(fit.params)
+
+    if best_name in _NONLINEAR_LOOKUP:
+        _, func, param_names, p0_orig, bounds_orig = _NONLINEAR_LOOKUP[best_name]
+        # Seed from best_model's own fitted params (a warm start - the
+        # row subset here may differ slightly from Section 3's, since
+        # this check restricts to rows where every magnitude measure is
+        # available), falling back to the model's original p0 if that
+        # fails for any reason.
+        try:
+            p0 = [best_model.params[n] for n in param_names]
+        except (AttributeError, KeyError, TypeError):
+            p0 = p0_orig
+        fit = NonlinearFitResult(best_name, func, param_names, x, y, p0, bounds=bounds_orig)
+
+        def predict(x_ho):
+            return func(x_ho, *fit.popt)
+
+        return fit, predict, np.asarray(fit.popt)
+
+    raise ValueError(f"no base-model recipe for best_name={best_name!r} "
+                      f"(expected one of {list(_OLS_MODEL_TERMS) + list(_NONLINEAR_LOOKUP)})")
+
+
+def _fit_augmented_model(best_name, base_fit, x, logm, y):
+    """Fit the SAME model shape as _fit_base_model, PLUS an additive
+    `+ q * logm` term, with every parameter (base params AND q) estimated
+    jointly - not q alone with the base params held fixed at base_fit's
+    values (base_fit's popt/params are only used to seed the nonlinear
+    curve_fit's starting point, for faster/more reliable convergence).
+    Returns (fit, predict_fn, params_array) - params_array's LAST entry is
+    always q."""
+    if best_name in _OLS_MODEL_TERMS:
+        terms = _OLS_MODEL_TERMS[best_name]
+        design = np.column_stack([f(x) for _, f in terms] + [logm])
+        fit = sm.OLS(y, design).fit()
+
+        def predict(x_ho, logm_ho):
+            d = np.column_stack([f(x_ho) for _, f in terms] + [logm_ho])
+            return fit.predict(d)
+
+        return fit, predict, np.asarray(fit.params)
+
+    if best_name in _NONLINEAR_LOOKUP:
+        _, func, param_names, p0_orig, bounds_orig = _NONLINEAR_LOOKUP[best_name]
+
+        def aug_func(X, *params):
+            xx, mm = X
+            base_params = params[:len(param_names)]
+            q = params[-1]
+            return func(xx, *base_params) + q * mm
+
+        aug_param_names = param_names + ["q_magnitude"]
+        aug_p0 = list(base_fit.popt) + [0.1]
+        if bounds_orig is not None:
+            lo, hi = bounds_orig
+            aug_bounds = (list(lo) + [-np.inf], list(hi) + [np.inf])
+        else:
+            aug_bounds = None
+        fit = NonlinearFitResult(best_name + " + magnitude", aug_func, aug_param_names,
+                                  np.vstack([x, logm]), y, aug_p0, bounds=aug_bounds)
+
+        def predict(x_ho, logm_ho):
+            return aug_func(np.vstack([x_ho, logm_ho]), *fit.popt)
+
+        return fit, predict, np.asarray(fit.popt)
+
+    raise ValueError(f"no augmented-model recipe for best_name={best_name!r} "
+                      f"(expected one of {list(_OLS_MODEL_TERMS) + list(_NONLINEAR_LOOKUP)})")
+
+
+def _run_augmented_check_for_column(df_large, best_name, best_model, measures,
+                                     fit_mask, heldout_mask, x_col):
+    """The full 'augment the selected model with each magnitude measure'
+    check, parametrized by WHICH column plays the role of x (normally
+    X_COLUMN, but see CHECK_MAGNITUDE_ON_ALL_ACTOR_RATIOS - this lets the
+    same check run once per column in ACTOR_RATIO_OPTIONS). Refits
+    best_name's shape FROM SCRATCH (not reusing Section 3's best_model fit
+    directly) on the common subset of rows where x_col AND every one of
+    the six magnitude measures are available, so (a) the base-vs-augmented
+    comparison for each measure is apples-to-apples against the SAME base
+    fit, and (b) every measure's ΔAIC/ΔR² is directly comparable to every
+    other measure's, since they all share one base. Each measure is then
+    refit as an ADDITIVE augmentation of that base shape - e.g. if
+    best_name == "Tanh", this fits logM = a*tanh(b*x) + q*log(measure_ratio)
+    with a, b, q ALL estimated jointly (not q alone with a, b held fixed
+    from the base fit - the base fit's params are only used as a
+    curve_fit warm start). Prints the fitted coefficients and a
+    human-readable formula for ALL 7 possible outcomes - the plain base
+    model, plus each of the 6 augmented variants - then compares each
+    augmented variant against the shared base fit (q's own significance,
+    ΔAIC, ΔR², and the held-out RMSE change). Returns the numeric
+    comparison as a DataFrame, or None if there weren't enough rows /
+    the base refit failed."""
+    measure_cols = list(measures.keys())
+    common = df_large.loc[fit_mask, [x_col] + measure_cols + ["logM"]].dropna()
+    for c in [x_col] + measure_cols:
+        common = common[common[c] > 0]
+
+    if len(common) < 5:
+        print(f"(fewer than 5 rows have {x_col} AND all six magnitude "
+              f"measures available - skipping the selected-model "
+              f"augmentation check for x_col={x_col!r}.)")
+        return None
+
+    x = np.log(common[x_col].astype(float)).to_numpy()
+    y = common["logM"].astype(float).to_numpy()
+
+    try:
+        base_fit, predict_base, base_params = _fit_base_model(best_name, best_model, x, y)
+    except (RuntimeError, ValueError) as e:
+        print(f"(refitting {best_name} on the common magnitude-available "
+              f"subset for x_col={x_col!r} failed: {e} - skipping.)")
+        return None
+
+    param_names = _param_names_for(best_name)
+    base_formula = _format_model_formula(best_name, base_params)
+
+    print("=" * 80)
+    print(f"MAGNITUDE-RATIO-ON-TOP-OF-SELECTED-MODEL CHECK "
+          f"(x = log({x_col}); base model: {best_name}, refit from scratch on "
+          f"n={len(common)} rows where {x_col} and all six magnitude measures "
+          f"are available; augmented: same shape + q*log(measure_ratio), all "
+          f"params refit jointly; fit excludes heatmap: {FIT_EXCLUDE_ALL_HEATMAP})")
+    print("=" * 80)
+    print(f"\nCoefficients and formulas for all {len(measures) + 1} possible "
+          f"outcomes (x = log({x_col})):\n")
+    print(f"  [Base, no magnitude term] "
+          + ", ".join(f"{n}={v:.4f}" for n, v in zip(param_names, base_params)))
+    print(f"      {base_formula}")
+
+    biv_rows = []
+    for col, label in measures.items():
+        logm = np.log(common[col].astype(float)).to_numpy()
+
+        try:
+            aug_fit, predict_aug, aug_params = _fit_augmented_model(best_name, base_fit, x, logm, y)
+        except (RuntimeError, ValueError) as e:
+            print(f"\n  [+ {label} ({col})] fit failed ({e}) - skipped.")
+            continue
+
+        q_hat = float(aug_params[-1])
+        q_pvalue = float(aug_fit.pvalues[-1])
+        aug_formula = _format_model_formula(best_name, aug_params[:-1], magnitude_col=col, q=q_hat)
+
+        print(f"\n  [+ {label} ({col})] "
+              + ", ".join(f"{n}={v:.4f}" for n, v in zip(param_names, aug_params[:-1]))
+              + f", q={q_hat:.4f} (p={q_pvalue:.4f})")
+        print(f"      {aug_formula}")
+
+        delta_aic = float(aug_fit.aic - base_fit.aic)
+        delta_r2 = float(aug_fit.rsquared - base_fit.rsquared)
+
+        resid_base = y - np.asarray(predict_base(x))
+        resid_aug = y - np.asarray(predict_aug(x, logm))
+        rmse_base = float(np.sqrt(np.mean(resid_base ** 2)))
+        rmse_aug = float(np.sqrt(np.mean(resid_aug ** 2)))
+
+        heldout_delta_rmse = n_heldout_biv = None
+        if FIT_EXCLUDE_ALL_HEATMAP:
+            ho = df_large.loc[heldout_mask, [x_col, col, "logM"]].dropna()
+            ho = ho[(ho[x_col] > 0) & (ho[col] > 0)]
+            n_heldout_biv = len(ho)
+            if n_heldout_biv > 0:
+                hx = np.log(ho[x_col].astype(float)).to_numpy()
+                hlogm = np.log(ho[col].astype(float)).to_numpy()
+                hy = ho["logM"].astype(float).to_numpy()
+                resid_ho_base = hy - np.asarray(predict_base(hx))
+                resid_ho_aug = hy - np.asarray(predict_aug(hx, hlogm))
+                rmse_ho_base = float(np.sqrt(np.mean(resid_ho_base ** 2)))
+                rmse_ho_aug = float(np.sqrt(np.mean(resid_ho_aug ** 2)))
+                heldout_delta_rmse = rmse_ho_aug - rmse_ho_base
+
+        biv_rows.append({
+            "measure": label,
+            "column": col,
+            "n_fit": len(common),
+            "q_magnitude": q_hat,
+            "q_pvalue": q_pvalue,
+            "r2_base": float(base_fit.rsquared),
+            "r2_augmented": float(aug_fit.rsquared),
+            "delta_r2": delta_r2,
+            "aic_base": float(base_fit.aic),
+            "aic_augmented": float(aug_fit.aic),
+            "delta_aic": delta_aic,
+            "rmse_base": rmse_base,
+            "rmse_augmented": rmse_aug,
+            "n_heldout": n_heldout_biv,
+            "heldout_delta_rmse": heldout_delta_rmse,
+        })
+    print()
+
+    biv_report = pd.DataFrame(biv_rows).sort_values("delta_aic").reset_index(drop=True)
+    biv_report.index += 1
+    biv_report.index.name = "Rank (by ΔAIC, more negative = adds more)"
+
+    print("=" * 80)
+    print(f"MAGNITUDE-RATIO-ON-TOP-OF-SELECTED-MODEL (x_col={x_col}): numeric comparison")
+    print("=" * 80)
+    with pd.option_context("display.width", 200, "display.max_columns", None):
+        print(biv_report[["measure", "column", "n_fit", "q_magnitude",
+                           "q_pvalue", "delta_r2", "delta_aic", "rmse_base",
+                           "rmse_augmented"]])
+    if FIT_EXCLUDE_ALL_HEATMAP and not biv_report.empty:
+        with pd.option_context("display.width", 200, "display.max_columns", None):
+            print("\nGeneralization to held-out heatmap pairs "
+                  "(heldout_delta_rmse < 0 means adding the measure also helps out-of-sample):")
+            print(biv_report[["measure", "column", "n_heldout", "heldout_delta_rmse"]])
+    if not biv_report.empty:
+        n_sig = int((biv_report["q_pvalue"] < 0.05).sum())
+        print(f"\n{n_sig}/{len(biv_report)} magnitude measures have a statistically "
+              f"significant (p<0.05) coefficient q ALONGSIDE the {best_name} model "
+              f"fit on x=log({x_col}) - i.e. carry information that model doesn't "
+              f"already capture, at that threshold.")
+        best_biv = biv_report.iloc[0]
+        print(f"Largest ΔAIC improvement: {best_biv['measure']} ({best_biv['column']}), "
+              f"ΔAIC={best_biv['delta_aic']:.3f}, ΔR²={best_biv['delta_r2']:.4f}, "
+              f"q={best_biv['q_magnitude']:.4f} (p={best_biv['q_pvalue']:.4f}).")
+    print()
+
+    return biv_report
+
+
+def check_magnitude_proxies(df_large: pd.DataFrame, best_name=None, best_model=None):
+    """Two checks on the six candidate "proxy magnitude" ratios -
+    E[average entry] (avg_ratio), E[largest entry] (max_ratio), E[L1
+    norm] (l1_ratio), E[L2 norm] (l2_ratio), E[RMS] (rms_ratio),
+    E[standard deviation] (std_ratio), all sourced from
+    Utilities.weight_norm_data.expected_magnitude() via
+    Utilities.indifference_data.compute_ratios():
+
+    1. UNIVARIATE - fit the SAME zero-intercept log-log model this file
+       uses for X_COLUMN, ``logM = p * log(measure_ratio)``, alone, and
+       report how well each measure predicts logM by itself: fitted
+       exponent p, R² and RMSE on the fit data, plus (when
+       FIT_EXCLUDE_ALL_HEATMAP is True) an out-of-sample RMSE/MAE on the
+       excluded heatmap-involved pairs.
+
+    2. AUGMENTED-SELECTED-MODEL - takes best_name/best_model (Section 3's
+       AIC-ranked selection - whichever shape that turned out to be, e.g.
+       "Tanh") and REFITS THAT EXACT SHAPE FROM SCRATCH (not reusing
+       Section 3's fitted params - see _fit_base_model) on the common
+       subset of rows where every one of the six magnitude measures is
+       available, then, for each measure, fits the SAME shape again with
+       an additive ``+ q*log(measure_ratio)`` term, ALL parameters
+       (including q) estimated JOINTLY, e.g. best_name == "Tanh" gives
+       ``logM = a*tanh(b*x) + q*log(measure_ratio)`` with a, b, q all fit
+       together (the base fit's params are only used as a curve_fit warm
+       start, not held fixed). Prints the fitted coefficients and a
+       human-readable formula for ALL 7 possible outcomes - the plain
+       base model, plus each of the 6 augmented variants - then compares
+       each augmented variant against the shared base fit (q's own
+       significance, ΔAIC, ΔR², and the held-out RMSE change), to see
+       whether the measure adds anything ON TOP of a base model rather
+       than whether it's a good predictor in isolation. By default this
+       runs once, against best_name/X_COLUMN only. Two independent
+       booleans widen it: CHECK_MAGNITUDE_ON_ALL_ACTOR_RATIOS runs it
+       once for EACH column in ACTOR_RATIO_OPTIONS (actor_ratio,
+       layer2_ratio, action_net_ratio, total_ratio) instead of just
+       X_COLUMN; CHECK_MAGNITUDE_ON_ALL_MODELS runs it once for EVERY
+       model shape in `models` (Linear, Quadratic, Cubic, Cubic (no x²),
+       Tanh, Rational saturation, Shifted power, Linear+log) instead of
+       just best_name. Both True checks every model shape against every
+       actor-ratio column. Pass best_name/best_model=None (the default)
+       to skip this half and only run the univariate check.
+
+    Both use the same fit-inclusion rule as the main X_COLUMN fit above
+    (FIT_EXCLUDE_ALL_HEATMAP) so all checks are directly comparable.
+    Returns (univariate_report, bivariate_result), where bivariate_result
+    is a single DataFrame (best_name against X_COLUMN only) unless either
+    CHECK_MAGNITUDE_ON_ALL_ACTOR_RATIOS or CHECK_MAGNITUDE_ON_ALL_MODELS
+    is True, in which case it's a nested dict {column: {model_name:
+    DataFrame}}."""
+    measures = {
+        "avg_ratio": "E[average entry]",
+        "max_ratio": "E[largest entry]",
+        "l1_ratio": "E[L1 norm]",
+        "l2_ratio": "E[L2 norm]",
+        "rms_ratio": "E[RMS]",
+        "std_ratio": "E[standard deviation]",
+    }
+
+    fit_mask = ~df_large["is_heatmap"] if FIT_EXCLUDE_ALL_HEATMAP else pd.Series(True, index=df_large.index)
+    heldout_mask = df_large["is_heatmap"] if FIT_EXCLUDE_ALL_HEATMAP else pd.Series(False, index=df_large.index)
+
+    rows = []
+    for col, label in measures.items():
+        fit_sub = df_large.loc[fit_mask, [col, "logM"]].dropna()
+        fit_sub = fit_sub[fit_sub[col] > 0]
+        if len(fit_sub) < 3:
+            print(f"  {label} ({col}): fewer than 3 usable points - skipped.")
+            continue
+
+        x_fit = np.log(fit_sub[col].astype(float))
+        y_fit = fit_sub["logM"].astype(float)
+        model = sm.OLS(y_fit.to_numpy(), x_fit.to_numpy().reshape(-1, 1)).fit()
+        p_hat = float(model.params[0])
+        resid_fit = y_fit.to_numpy() - model.predict(x_fit.to_numpy().reshape(-1, 1))
+        rmse_fit = float(np.sqrt(np.mean(resid_fit ** 2)))
+        mae_fit = float(np.mean(np.abs(resid_fit)))
+
+        rmse_heldout = mae_fit_heldout = n_heldout = None
+        if FIT_EXCLUDE_ALL_HEATMAP:
+            heldout_sub = df_large.loc[heldout_mask, [col, "logM"]].dropna()
+            heldout_sub = heldout_sub[heldout_sub[col] > 0]
+            n_heldout = len(heldout_sub)
+            if n_heldout > 0:
+                x_ho = np.log(heldout_sub[col].astype(float))
+                y_ho = heldout_sub["logM"].astype(float)
+                resid_ho = y_ho.to_numpy() - p_hat * x_ho.to_numpy()
+                rmse_heldout = float(np.sqrt(np.mean(resid_ho ** 2)))
+                mae_fit_heldout = float(np.mean(np.abs(resid_ho)))
+
+        rows.append({
+            "measure": label,
+            "column": col,
+            "n_fit": len(fit_sub),
+            "p_hat": p_hat,
+            "r_squared": float(model.rsquared),
+            "rmse_fit": rmse_fit,
+            "mae_fit": mae_fit,
+            "n_heldout": n_heldout,
+            "rmse_heldout": rmse_heldout,
+            "mae_heldout": mae_fit_heldout,
+        })
+
+    report = pd.DataFrame(rows).sort_values("rmse_fit").reset_index(drop=True)
+    report.index += 1
+    report.index.name = "Rank (by fit RMSE)"
+
+    print("=" * 80)
+    print("PROXY-MAGNITUDE-STATISTICS CHECK "
+          f"(model: logM = p * log(measure_ratio), fit excludes heatmap: "
+          f"{FIT_EXCLUDE_ALL_HEATMAP})")
+    print("=" * 80)
+    with pd.option_context("display.width", 160, "display.max_columns", None):
+        print(report)
+    if not report.empty:
+        best = report.iloc[0]
+        print(f"\nBest single predictor by fit RMSE: {best['measure']} "
+              f"({best['column']}), p_hat={best['p_hat']:.4f}, "
+              f"R²={best['r_squared']:.4f}, fit RMSE={best['rmse_fit']:.5f}"
+              + (f", heldout RMSE={best['rmse_heldout']:.5f}"
+                 if best['rmse_heldout'] is not None else ""))
+        comparison_row = comparison[comparison["Model"] == "Linear"]
+        if not comparison_row.empty:
+            print(f"(For reference, X_COLUMN={X_COLUMN!r}'s own Linear-model "
+                  f"AIC/BIC are in the MODEL COMPARISON table printed above - "
+                  f"this check is about which MAGNITUDE MEASURE to use, not "
+                  f"which functional shape.)")
+    print()
+
+    # ------------------------------------------------------------------
+    # Bivariate add-on: does each magnitude measure add anything ON TOP
+    # of a base model, rather than replace it? By default this checks
+    # only the SELECTED model (best_name/best_model, from Section 3's
+    # AIC-ranked choice) against X_COLUMN. Two independent/orthogonal
+    # booleans (see the config block at the top of this file) widen that:
+    #   - CHECK_MAGNITUDE_ON_ALL_ACTOR_RATIOS: check against every column
+    #     in ACTOR_RATIO_OPTIONS, not just X_COLUMN.
+    #   - CHECK_MAGNITUDE_ON_ALL_MODELS: check every model shape in
+    #     `models` (Linear, Quadratic, Cubic, Cubic (no x²), Tanh,
+    #     Rational saturation, Shifted power, Linear+log), not just
+    #     best_name.
+    # Both True means every model shape × every actor-ratio column, all
+    # refit from scratch (see _run_augmented_check_for_column).
+    # ------------------------------------------------------------------
+    if best_name is None or best_model is None:
+        print("(best_name/best_model not provided - skipping the "
+              "selected-model augmentation check.)")
+        return report, None
+
+    x_cols = ACTOR_RATIO_OPTIONS if CHECK_MAGNITUDE_ON_ALL_ACTOR_RATIOS else [X_COLUMN]
+    models_to_check = (
+        list(models.items()) if CHECK_MAGNITUDE_ON_ALL_MODELS
+        else [(best_name, best_model)]
+    )
+
+    biv_reports = {}
+    for x_col in x_cols:
+        biv_reports[x_col] = {}
+        for model_name, model_obj in models_to_check:
+            biv_reports[x_col][model_name] = _run_augmented_check_for_column(
+                df_large, model_name, model_obj, measures, fit_mask, heldout_mask, x_col)
+
+    if not CHECK_MAGNITUDE_ON_ALL_ACTOR_RATIOS and not CHECK_MAGNITUDE_ON_ALL_MODELS:
+        # Neither widening boolean is set - keep the original return shape
+        # (a single DataFrame) rather than the nested dict, for backward
+        # compatibility with the pre-widening version of this function.
+        return report, biv_reports[X_COLUMN][best_name]
+    return report, biv_reports
+
+
+if CHECK_MAGNITUDE_PROXIES:
+    check_magnitude_proxies(df_large, best_name=best_name, best_model=best_model)
+
+
+# ----------------------------------------------------------------------
+# 6c. fit_ratio_combo - a generic "try any combination of ratio columns
+#     and functional shapes, all fit jointly" utility, for exploring
+#     magnitude-ratio usages beyond what check_magnitude_proxies (6b)
+#     hardcodes (a single additive term on top of the SELECTED model).
+#     Give it a list of (input_col, function_type) tuples - e.g.
+#     [("actor_ratio", "tanh"), ("max_ratio", "linear")] - and it fits
+#     logM = f_1(log(input_col_1)) + f_2(log(input_col_2)) + ...
+#     with EVERY term's parameters estimated JOINTLY in one nonlinear
+#     least-squares fit (not one term at a time), then reports the
+#     standard fit-quality numbers so different combos can be compared
+#     apples-to-apples against each other and against the models in the
+#     main `models` dict above (same AIC/BIC/R² conventions throughout
+#     this file: uncentered R², forced-zero-intercept terms, Gaussian-
+#     log-likelihood AIC/BIC).
+# ----------------------------------------------------------------------
+
+# Supported per-term functional shapes. Each maps to (param_names, the
+# term function itself, initial guess p0, (lo, hi) bounds - "None" bound
+# entries are filled in per-term at fit time since they depend on that
+# term's own data scale - and a formula-string template). All shapes
+# mirror the OLS/nonlinear model shapes used elsewhere in this file
+# (Section 2/2b), just isolated into single reusable additive terms
+# instead of whole standalone models, so a "tanh" term here behaves
+# identically to fitting X_COLUMN with the "Tanh" model above.
+_COMBO_TERM_TYPES = {
+    "linear": (['a'], lambda x, a: a * x),
+    "quadratic": (['a', 'b'], lambda x, a, b: a * x + b * x ** 2),
+    "cubic": (['a', 'b'], lambda x, a, b: a * x + b * x ** 3),
+    "tanh": (['a', 'b'], lambda x, a, b: a * np.tanh(b * x)),
+    "rational": (['a', 'b'], lambda x, a, b: a * x / (1 + b * np.abs(x))),
+    "shifted_power": (['a', 'p'], lambda x, a, p: np.sign(x) * a * ((1 + np.abs(x)) ** p - 1)),
+    "linlog": (['a', 'b', 'c'], lambda x, a, b, c: a * x + b * np.log1p(c * x)),
+}
+_COMBO_TERM_P0 = {
+    "linear": [1.0],
+    "quadratic": [1.0, 0.1],
+    "cubic": [1.0, -0.1],
+    "tanh": [1.0, 1.0],
+    "rational": [1.0, 1.0],
+    "shifted_power": [1.0, 0.5],
+    "linlog": [0.5, 0.5, 0.1],
+}
+# (lo, hi) per parameter; None entries (linlog's `c`) are resolved per-term
+# from that term's own x-range at fit time, same guard _linlog_model /
+# _nonlinear_specs use above (keeps 1 + c*x > 0 across the actual data).
+_COMBO_TERM_BOUNDS = {
+    "linear": ([-np.inf], [np.inf]),
+    "quadratic": ([-np.inf, -np.inf], [np.inf, np.inf]),
+    "cubic": ([-np.inf, -np.inf], [np.inf, np.inf]),
+    "tanh": ([-np.inf, -np.inf], [np.inf, np.inf]),
+    "rational": ([-np.inf, 0.0], [np.inf, np.inf]),  # b>=0 so the denominator can't hit 0
+    "shifted_power": ([-np.inf, 1e-6], [np.inf, 1 - 1e-6]),  # enforces 0 < p < 1
+    "linlog": ([-np.inf, -np.inf, None], [np.inf, np.inf, None]),
+}
+_COMBO_TERM_FORMULA = {
+    "linear": lambda p, col: f"{p[0]:.4f}*log({col})",
+    "quadratic": lambda p, col: f"{p[0]:.4f}*log({col}) + {p[1]:.4f}*log({col})^2",
+    "cubic": lambda p, col: f"{p[0]:.4f}*log({col}) + {p[1]:.4f}*log({col})^3",
+    "tanh": lambda p, col: f"{p[0]:.4f}*tanh({p[1]:.4f}*log({col}))",
+    "rational": lambda p, col: f"{p[0]:.4f}*log({col}) / (1 + {p[1]:.4f}*|log({col})|)",
+    "shifted_power": lambda p, col: f"sign(log({col}))*{p[0]:.4f}*((1+|log({col})|)^{p[1]:.4f} - 1)",
+    "linlog": lambda p, col: f"{p[0]:.4f}*log({col}) + {p[1]:.4f}*log(1 + {p[2]:.4f}*log({col}))",
+}
+# Friendlier aliases for the function_type string, so callers can use
+# names matching this file's model-comparison table ("Tanh", "Rational
+# saturation", "Shifted power", "Linear+log", "Cubic (no x²)", etc.)
+# interchangeably with the plain lowercase keys above.
+_COMBO_TYPE_ALIASES = {
+    "rational_saturation": "rational",
+    "linear_log": "linlog",
+    "linear+log": "linlog",
+    "cubic_no_x2": "cubic",
+    "cubic_no_x": "cubic",
+}
+
+
+def _normalize_combo_type(function_type):
+    """'Tanh' / 'Rational saturation' / 'linear' / ... -> a key in
+    _COMBO_TERM_TYPES. Raises ValueError with the valid options if the
+    (normalized) type isn't recognized."""
+    key = (str(function_type).strip().lower()
+           .replace(" ", "_").replace("-", "_")
+           .replace("(", "").replace(")", "").replace("²", "2"))
+    key = _COMBO_TYPE_ALIASES.get(key, key)
+    if key not in _COMBO_TERM_TYPES:
+        raise ValueError(f"unknown function_type {function_type!r} "
+                          f"(expected one of {sorted(_COMBO_TERM_TYPES)}, "
+                          f"or an alias in {sorted(_COMBO_TYPE_ALIASES)})")
+    return key
+
+
+ComboFitResult = namedtuple("ComboFitResult", [
+    "terms",            # the (input_col, function_type) list, as given
+    "formula",          # e.g. "logM = 0.66*tanh(2.30*log(actor_ratio)) + 1.18*log(max_ratio)"
+    "params",           # dict: "col:type:name" -> fitted value (flat, in fit order)
+    "n_fit",            # rows used for fitting
+    "k_params",         # total number of fitted parameters across all terms
+    "r_squared",        # uncentered R^2 on the fit data
+    "rsquared_adj",     # uncentered adjusted R^2 on the fit data
+    "rmse",             # RMSE on the fit data
+    "aic",              # Gaussian-log-likelihood AIC (same convention as `models` above)
+    "bic",              # same, BIC
+    "llf",              # log-likelihood
+    "n_heldout",         # rows available in heldout_mask (None if not applicable)
+    "rmse_heldout",     # held-out RMSE (None if n_heldout is 0/None)
+    "predict",          # callable: DataFrame with the needed ratio columns (natural scale, >0) -> predicted logM
+])
+
+
+def fit_ratio_combo(df_large, terms, fit_mask=None, heldout_mask=None,
+                     target_col="logM", maxfev=20000):
+    """Fit logM = sum_i f_i(log(input_col_i)) for an arbitrary list of
+    (input_col, function_type) tuples, ALL terms' parameters estimated
+    JOINTLY in a single nonlinear least-squares fit (via scipy's
+    curve_fit) - e.g.
+        fit_ratio_combo(df_large, [("actor_ratio", "tanh"), ("max_ratio", "linear")])
+    fits logM = a*tanh(b*log(actor_ratio)) + c*log(max_ratio), estimating
+    a, b, c together (not tanh's a/b first and then c on the residual).
+    See _COMBO_TERM_TYPES above for the supported function_type values
+    ("linear", "quadratic", "cubic", "tanh", "rational", "shifted_power",
+    "linlog" - plus a few friendlier aliases like "Tanh" or "Rational
+    saturation" matching this file's model-comparison table names).
+
+    df_large should be the raw, un-logged ratio DataFrame (as produced by
+    Utilities.indifference_data.all_ratios(), e.g. this file's own
+    `df_large`) - every input_col and target_col value is taken straight
+    from it and log-transformed internally; rows are dropped if any
+    needed column is missing or <= 0 (log requires positive input, same
+    convention as X_COLUMN/RESIDUAL_X_COLUMN elsewhere in this file).
+
+    fit_mask/heldout_mask default to this file's usual
+    FIT_EXCLUDE_ALL_HEATMAP split (fit on non-heatmap rows, evaluate
+    held-out generalization on heatmap-involved rows) - pass your own
+    boolean Series (aligned to df_large's index) to override either.
+
+    Returns a ComboFitResult namedtuple (itself a tuple, so it also
+    unpacks/indexes positionally) with r_squared, rmse, aic, bic, plus
+    the fitted params, a human-readable formula, adjusted R², log-
+    likelihood, and held-out RMSE. Raises ValueError if a function_type
+    isn't recognized or there are too few usable rows (<3) to fit."""
+    if not terms:
+        raise ValueError("terms must be a non-empty list of (input_col, function_type) tuples")
+
+    if fit_mask is None:
+        fit_mask = ~df_large["is_heatmap"] if FIT_EXCLUDE_ALL_HEATMAP else pd.Series(True, index=df_large.index)
+    if heldout_mask is None:
+        heldout_mask = df_large["is_heatmap"] if FIT_EXCLUDE_ALL_HEATMAP else pd.Series(False, index=df_large.index)
+
+    normalized = [(col, _normalize_combo_type(ftype)) for col, ftype in terms]
+    cols_needed = [col for col, _ in normalized]
+
+    fit_rows = df_large.loc[fit_mask, cols_needed + [target_col]].dropna()
+    for c in cols_needed:
+        fit_rows = fit_rows[fit_rows[c] > 0]
+    n_fit = len(fit_rows)
+    if n_fit < 3:
+        raise ValueError(f"only {n_fit} usable row(s) for terms={terms!r} "
+                          f"(need >=3 rows where every input_col and {target_col!r} "
+                          f"are present and positive) - cannot fit")
+
+    xs = [np.log(fit_rows[col].astype(float)).to_numpy() for col in cols_needed]
+    y = fit_rows[target_col].astype(float).to_numpy()
+
+    # Assemble the flat parameter vector (concatenated across terms, in
+    # order) plus p0/bounds, tracking each term's [start, end) slice into
+    # that flat vector so combo_func can dispatch back out to each term's
+    # own function.
+    param_names, p0, lo_bounds, hi_bounds, term_slices = [], [], [], [], []
+    idx = 0
+    for x_i, (col, key) in zip(xs, normalized):
+        names, _func = _COMBO_TERM_TYPES[key]
+        k = len(names)
+        term_slices.append((idx, idx + k))
+        idx += k
+        param_names.extend(f"{col}:{key}:{n}" for n in names)
+        p0.extend(_COMBO_TERM_P0[key])
+        lo, hi = (list(b) for b in _COMBO_TERM_BOUNDS[key])
+        if key == "linlog":
+            x_scale = max(float(np.max(np.abs(x_i))), 1e-6)
+            lo[2], hi[2] = -1.0 / (2 * x_scale), 1.0 / (2 * x_scale)
+        lo_bounds.extend(lo)
+        hi_bounds.extend(hi)
+
+    X_stack = np.vstack(xs)  # shape (n_terms, n_fit)
+
+    def combo_func(X, *params):
+        total = np.zeros(X.shape[1])
+        for i, (col, key) in enumerate(normalized):
+            _names, func = _COMBO_TERM_TYPES[key]
+            start, end = term_slices[i]
+            total = total + func(X[i], *params[start:end])
+        return total
+
+    popt, pcov = curve_fit(combo_func, X_stack, y, p0=p0,
+                            bounds=(lo_bounds, hi_bounds), maxfev=maxfev)
+
+    resid = y - combo_func(X_stack, *popt)
+    rss = float(np.sum(resid ** 2))
+    k_params = len(popt)
+    sigma2 = max(rss / n_fit, 1e-300)
+    llf = -0.5 * n_fit * (np.log(2 * np.pi) + np.log(sigma2) + 1)
+    aic = -2 * llf + 2 * k_params
+    bic = -2 * llf + k_params * np.log(n_fit)
+    sst_uncentered = float(np.sum(y ** 2))
+    r_squared = 1 - rss / sst_uncentered if sst_uncentered > 0 else float('nan')
+    df_resid = n_fit - k_params
+    rsquared_adj = (1 - (1 - r_squared) * n_fit / df_resid) if df_resid > 0 else float('nan')
+    rmse = float(np.sqrt(rss / n_fit))
+
+    params = dict(zip(param_names, popt))
+    formula = " + ".join(
+        _COMBO_TERM_FORMULA[key](popt[start:end], col)
+        for (col, key), (start, end) in zip(normalized, term_slices)
+    )
+    formula = f"logM = {formula}"
+
+    def predict(pred_df):
+        x_pred = [np.log(pred_df[col].astype(float)).to_numpy() for col in cols_needed]
+        return combo_func(np.vstack(x_pred), *popt)
+
+    n_heldout = rmse_heldout = None
+    ho_rows = df_large.loc[heldout_mask, cols_needed + [target_col]].dropna()
+    for c in cols_needed:
+        ho_rows = ho_rows[ho_rows[c] > 0]
+    n_heldout = len(ho_rows)
+    if n_heldout > 0:
+        y_ho = ho_rows[target_col].astype(float).to_numpy()
+        resid_ho = y_ho - predict(ho_rows)
+        rmse_heldout = float(np.sqrt(np.mean(resid_ho ** 2)))
+
+    return ComboFitResult(
+        terms=list(terms), formula=formula, params=params, n_fit=n_fit,
+        k_params=k_params, r_squared=r_squared, rsquared_adj=rsquared_adj,
+        rmse=rmse, aic=aic, bic=bic, llf=llf, n_heldout=n_heldout,
+        rmse_heldout=rmse_heldout, predict=predict,
+    )
+
+
+# ----------------------------------------------------------------------
+# 7. Plot: data, fitted curves, and residuals - built and shown LAST, only
+#    after every print() above has already reached the terminal (plt.show()
+#    blocks on an interactive backend, so if this were placed earlier the
+#    plot window would hold up all of the later printed sections).
+# ----------------------------------------------------------------------
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+# --- Left plot: Scatter (ALL plotted points, including any excluded from
+#     the fit) + fitted curves (fit on df_fit only) on log scale ---
+ax1.scatter(df_plot['x'], df_plot['y_log'], s=60, c=_point_colors(df_plot),
+            label='log(M) data', zorder=5)
+if COLOR_HEATMAP_BY_TYPE:
+    from matplotlib.lines import Line2D
+    legend_points = [
+        Line2D([0], [0], marker='o', color='none', markerfacecolor='black', label='non-heatmap'),
+        Line2D([0], [0], marker='o', color='none', markerfacecolor='darkblue', label='half-heatmap (1 side heatmap)'),
+        Line2D([0], [0], marker='o', color='none', markerfacecolor='skyblue', label='full-heatmap (both sides heatmap)'),
+    ]
+else:
+    legend_points = []
+colors = ['blue', 'green', 'red', 'orange', 'purple', 'brown', 'magenta', 'teal']
+for (name, model), color in zip(models.items(), colors):
+    y_pred = model.predict(pred_df)
+    ax1.plot(x_pred, y_pred, '--', linewidth=2, color=color, label=name)
+
+ax1.set_xlabel(f'x = log({X_COLUMN}) = log({X_LABEL}) (variable/fixed)', fontsize=12)
+ax1.set_ylabel('log(M)', fontsize=12)
+ax1.set_title(f'Fits on log(M) scale{fit_note}')
+handles, labels = ax1.get_legend_handles_labels()
+ax1.legend(handles=legend_points + handles, labels=[h.get_label() for h in legend_points] + labels)
+ax1.grid(alpha=0.3)
+
+# --- Right plot: Residuals vs. RESIDUAL_X_COLUMN for the best model
+#     (residuals themselves computed in section 5 above; x-axis values
+#     come from _residual_x_values, defaulting to fitted log(M) but
+#     switchable to log(any ratio column) via RESIDUAL_X_COLUMN) ---
+resid_x_plot, resid_x_label = _residual_x_values(df_plot)
+ax2.scatter(resid_x_plot, df_plot['residual'], s=60, c=_point_colors(df_plot), alpha=0.7)
+ax2.axhline(y=0, color='red', linestyle='--', linewidth=2)
+
+# Add LOWESS trend to residuals (should be flat) - computed on the FIT
+# data only, matching what the model actually saw.
+if len(df) > 5:
+    resid_x_fit, _ = _residual_x_values(df)
+    lowess_res = lowess(df['residual'], resid_x_fit, frac=0.6)
+    ax2.plot(lowess_res[:, 0], lowess_res[:, 1], color='orange', linewidth=2,
+             label='LOWESS trend (should be flat)')
+    ax2.legend()
+
+ax2.set_xlabel(resid_x_label, fontsize=12)
+ax2.set_ylabel('Residual (log(M) - fitted)', fontsize=12)
+ax2.set_title(f'Residuals for {best_name} vs {resid_x_label}{fit_note}')
+ax2.grid(alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('fit_log_y_clean.png', dpi=150)
+plt.show()
