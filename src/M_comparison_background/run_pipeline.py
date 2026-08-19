@@ -23,11 +23,22 @@ only ever trained once), this:
   3. upserts the resulting row into group_data.py's
      group_data.csv (File 1).
 
-For every comparison pair, this upserts a scaffold row into
-pair_data.py's pair_data.csv (File 2) - spec_fixed/spec_variable
-plus whatever M/beta/certified/status/diff_* were already known for that
-exact pair (nothing is overwritten with blanks; see
-pair_data.upsert_pair_row's preserve_existing_diffs).
+2026-08-19: this pipeline does NOT write anything into pair_data.py's
+pair_data.csv (File 2) - it never has an M/beta/certified/status to
+give it (this pipeline only trains individual groups and computes their
+math-only metrics; finding M is find_indifference_reward.py/
+certify_possible_M_value.py's job entirely, via run_indifference_batch.py
+or the legacy indifference_data.csv migration). Writing a pair_data.csv
+row here used to happen anyway, as a blank "M not known yet" scaffold -
+that produced permanent M-less rows in pair_data.csv/predictive_data.csv
+for any comparison run through THIS pipeline alone (e.g. the two example
+entries in run_my_comparisons.py's COMPARISONS list) that never actually
+went through the indifference search, since nothing ever came back to
+fill them in. Per direct request, a pair_data.csv row for a comparison
+should only ever appear once that comparison has actually produced an M
+value - so this pipeline now leaves pair_data.csv alone entirely, and a
+pair only shows up there (and in predictive_data.csv) once it's gone
+through the real M-finding pipeline.
 
 WEIGHT-DIFFERENCE-NORM (the diff_* columns, computed by
 run_shared_machinery_experiment.py's two-phase reward-switch protocol)
@@ -58,11 +69,24 @@ calls this. Directly:
 """
 from __future__ import annotations
 
+import os
+import sys
+
+# 2026-08-19: data/ moved back out of M_comparison_background/ into its
+# own top-level src/data/ (sibling of this file's own M_comparison_background/
+# folder), per direct request - unlike groups.py/trainPPO.py/etc., which
+# stay in M_comparison_background/, "data" is no longer this file's own
+# sibling, so it needs its own sys.path insert (this file's grandparent,
+# i.e. src/) rather than relying on a caller having already put
+# M_comparison_background on sys.path (that insert only ever helped
+# because data/ used to live *inside* M_comparison_background/ - it
+# doesn't anymore).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from groups import ComplexityGroupBase
 from data.group_data import (
     build_group_row, cache_key_str, get_group_row, upsert_group_row, weight_norms_from_model,
 )
-from data.pair_data import pair_row_from_group_instances, upsert_pair_row
 
 # The pipeline's own default "model hyperparameters and size" - used for
 # any comparison whose `hyperparameters` entry is None/{} and any key it
@@ -159,8 +183,14 @@ def run_comparisons(comparisons, force_retrain=False) -> list[dict]:
     "no variance" via the existing row is the whole point otherwise).
 
     Returns the list of group_data.csv rows (dicts) for every unique
-    group touched, in dedup order. Populates group_data.csv (File 1) and
-    pair_data.csv (File 2) as a side effect - call
+    group touched, in dedup order. Populates group_data.csv (File 1) only
+    - see this function's own docstring/the module docstring for why
+    pair_data.csv (File 2) is deliberately left untouched here: this
+    pipeline never has an M value to give it, so writing a row here
+    would only ever be a permanent M-less scaffold. Run this comparison
+    through find_indifference_reward.py/run_indifference_batch.py (or
+    let the legacy indifference_data.csv migration pick it up) to get it
+    an actual pair_data.csv row; call
     build_predictive_data.build_predictive_data() afterwards to
     (re)generate predictive_data.csv (File 3) from the updated inputs."""
     unique_groups = _dedupe_groups(comparisons)
@@ -171,12 +201,6 @@ def run_comparisons(comparisons, force_retrain=False) -> list[dict]:
             group, hyperparameters=hyperparameters, force_retrain=force_retrain,
         )
         group_rows.append(row)
-
-    for fixed, variable, _hyperparameters in comparisons:
-        pair_row = pair_row_from_group_instances(
-            fixed, variable, source_file="run_pipeline.py",
-        )
-        upsert_pair_row(pair_row)
 
     return group_rows
 

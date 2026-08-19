@@ -56,5 +56,3 @@ spec_fixed,spec_variable,label,M,beta,certified,status,diff_whole_model,diff_act
 "('margin', 15.0, 0.65, 0.0, 4)","('margin', 15.0, 6.5, 0.0, 4)",k_fixedmargin_scaled-15-0.65_k_variablemargin_scaled-15-6.5,0.5976334912203825,45.542953671872176,True,ok,,,,,,,,,,indifference_data.csv
 "('margin', 15.0, 0.4, 0.0, 4)","('margin', 15.0, 1.6, 0.0, 4)",k_fixedmargin_scaled-15-0.4_k_variablemargin_scaled-15-1.6,0.7057557969294924,19.604191966715884,True,ok,,,,,,,,,,indifference_data.csv
 "('margin', 15.0, 1.6, 0.0, 4)","('margin', 15.0, 4.0, 0.0, 4)",k_fixedmargin_scaled-15-1.6_k_variablemargin_scaled-15-4.0,0.76836677723032,18.96972472623083,True,ok,,,,,,,,,,indifference_data.csv
-"('margin', 1.0, 1.0, 0.0, 4)","('margin', 4.0, 1.0, 0.0, 4)",,,,,,,,,,,,,,,run_pipeline.py
-"('heatmap', 1.0, 2, 4)","('heatmap', 1.0, 6, 4)",,,,,,,,,,,,,,,run_pipeline.py

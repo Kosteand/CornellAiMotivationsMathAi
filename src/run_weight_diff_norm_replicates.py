@@ -6,15 +6,18 @@ survived find_indifference_reward.py/run_indifference_batch.py's
 confidence-interval-based estimation - 5 replicates with that pair's
 fixed side trained first (phase 1) / variable side second, and 5 with the
 order reversed, "just in case order matters" per the request - each of
-those 10 runs done TWICE more (20 total per comparison): once with
-`phase2_inactive_reward=0.0` (the OLD group - whichever went first -
-gets no reward at all once phase 2 starts, the original behavior) and
-once with `phase2_inactive_reward=-0.1` (the OLD group is actively
-penalized for still answering its own block once phase 2 starts, per
-direct request). `phase1_inactive_reward` is always 0.0 in BOTH versions -
-only phase 2's penalty is varied; phase 1's "wrong group" (whichever
-group hasn't gone first yet) is never penalized, only ever left at 0
-reward, in either version.
+those 10 runs done once with `phase2_inactive_reward=-1.0` (the OLD
+group - whichever went first - is actively penalized with a reward of
+-1, i.e. a penalty of 1, for still answering its own block once phase 2
+starts). `phase1_inactive_reward` is always 0.0 - phase 1's "wrong
+group" (whichever group hasn't gone first yet) is never penalized, only
+ever left at 0 reward.
+
+2026-08-19: PHASE2_INACTIVE_REWARDS previously also included 0.0 and
+-0.1 (see eval_logs/weight_diff_norm_replicates.csv, which already has
+those 1160 rows) - this run only adds the -1.0 condition on top of that,
+so PHASE2_INACTIVE_REWARDS below is now just (-1.0,) rather than
+re-running the two already-covered reward levels.
 
 THIS IS NOT run_p_curve_experiments.py's TESTS list. TESTS is a small
 (7-entry) illustrative set used for a completely different pipeline (the
@@ -98,18 +101,20 @@ from run_shared_machinery_experiment import (
 
 OUT_PATH = "eval_logs/weight_diff_norm_replicates.csv"
 
-N_REPLICATES_PER_ORDER = 5   # -> 10 runs per comparison per reward version (5 + 5)
+N_REPLICATES_PER_ORDER = 5   # -> 10 runs per comparison for this reward version
 PHASE_TIMESTEPS = 200_000    # matches this project's normal per-run budget
 BASE_SEED = 0
 INCORRECT_REWARD = 0.0       # matches every comparison in this project's convention
-PHASE1_INACTIVE_REWARD = 0.0  # always 0 in both reward versions - only phase 2 varies
-# The two versions of the experiment, per direct request: the OLD group
-# (whichever trained first) gets no reward at all once phase 2 starts
-# (matches the original/default behavior), vs. actively penalized for
-# still answering its own block once phase 2 starts. This DOUBLES the
-# total run count (2 reward versions x 2 orders x N_REPLICATES_PER_ORDER
-# per comparison, i.e. 20 total runs/comparison at the default 5).
-PHASE2_INACTIVE_REWARDS = (0.0, -0.1)
+PHASE1_INACTIVE_REWARD = 0.0  # always 0 - only phase 2's reward is varied
+# 2026-08-19: per direct request, this run adds a THIRD reward version on
+# top of the 0.0 and -0.1 versions already collected (see
+# eval_logs/weight_diff_norm_replicates.csv) - the OLD group (whichever
+# trained first) gets reward -1.0 (i.e. a penalty of 1) for still
+# answering its own block once phase 2 starts. Only this one reward
+# level is listed here so this run does 2 orders x N_REPLICATES_PER_ORDER
+# per comparison (10 total runs/comparison at the default 5), NOT a
+# re-run of the 0.0/-0.1 conditions.
+PHASE2_INACTIVE_REWARDS = (-1.0,)
 
 FIELDNAMES = [
     "spec_fixed", "spec_variable", "label", "M", "beta", "certified",

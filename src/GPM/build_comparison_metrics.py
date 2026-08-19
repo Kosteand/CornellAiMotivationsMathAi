@@ -53,15 +53,13 @@ import csv
 import os
 import sys
 
-# 2026-08-19: this file moved from src/ into src/GPM/, and group_data.py
-# (along with the rest of the run_my_comparisons.py dependency chain)
-# moved from src/ into its own self-contained src/M_comparison_background/
-# subfolder. Inserting that folder onto sys.path (computed from THIS
-# FILE's own location) keeps `from data.group_data import ...` resolvable
-# regardless of where this script is invoked from.
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "M_comparison_background",
-))
+# 2026-08-19: this file moved from src/ into src/GPM/; group_data.py (and
+# the rest of the three-file-architecture data/ module) moved from
+# src/M_comparison_background/data/ back out to its own top-level
+# src/data/ - so what this needs on sys.path is src/ itself (this file's
+# grandparent), not M_comparison_background/ (which no longer contains
+# "data" and isn't needed for anything else this file imports).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from run_p_curve_experiments import TESTS
 from data.group_data import cache_key_str, get_group_row
