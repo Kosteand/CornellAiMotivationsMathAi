@@ -21,11 +21,12 @@ the usual timestep budget, split into two back-to-back phases:
 
   Phase 1 (~first half, PHASE_TIMESTEPS each by default): group 1 keeps
       its normal reward value; group 2's reward is forced down to
-      `inactive_group_reward` (0.0 by default) - the agent has no
+      `phase1_inactive_reward` (0.0 by default) - the agent has no
       incentive to solve anything but group 1 this phase.
   Phase 2 (~second half): the roles flip - group 2 gets its normal
       reward value back, group 1's reward is forced to
-      `inactive_group_reward`.
+      `phase2_inactive_reward` (a SEPARATE parameter from phase 1's, also
+      0.0 by default - see "Gradient-starvation seam" below).
 
 Both groups are observed and both action blocks exist in every episode
 throughout - exactly like the normal two-group comparison env - only the
@@ -91,7 +92,8 @@ whether phase 2 is "continued" vs called as a brand-new run?
       today; flagged here so it isn't a surprise if schedules get added
       later.
 
-Does `inactive_group_reward` affect the inactive group's CORRECT and
+Does the phase's inactive reward (`phase1_inactive_reward`/
+`phase2_inactive_reward`) affect the inactive group's CORRECT and
 INCORRECT answers (it should, and now does)?
     Yes. BanditEnv originally had one global `incorrect_reward` shared by
     every group's block, independent of any group's own `.value` - so
@@ -99,15 +101,15 @@ INCORRECT answers (it should, and now does)?
     reward for actually landing on its label, while a wrong-but-in-that-
     block guess still paid the ordinary global incorrect_reward. That
     would have undermined the gradient-starvation seam (a nonzero/
-    negative `inactive_group_reward` needs to penalize EVERY action
-    toward the inactive group, not just the lucky/unlucky correct one).
+    negative phase reward needs to penalize EVERY action toward the
+    inactive group, not just the lucky/unlucky correct one).
     Utilities/bandit_env.py's BanditEnv now also accepts a per-group
     SEQUENCE for `incorrect_reward` (kept by reference, not copied, so
     external mutation is visible to every env instance sharing it - the
     same trick already used for `.value`); this script builds one shared
     `incorrect_rewards = [ir, ir]` list and, each phase, sets BOTH the
     inactive group's `.value` AND its `incorrect_rewards[i]` entry to
-    `inactive_group_reward`, so every action in the inactive group's
+    that phase's inactive reward, so every action in the inactive group's
     block - correct or not - gets the same reward. Passing a plain float
     to BanditEnv still works exactly as before (fully backward-
     compatible) for every other script in this repo.
@@ -120,7 +122,7 @@ given pair (it should be)?
     manual length-checking needed. Setting it up for a specific comparison
     is exactly as easy as building the fixed_group/variable_group pair in
     one of run_p_curve_experiments.py's TESTS entries: construct two
-    ComplexityGroup instances (typically two HeatmapGroup calls) and pass
+    AlternatingGroup instances (typically two HeatmapGroup calls) and pass
     them straight in, e.g. the __main__ block below reuses
     heatmap_vs_heatmap_harder_variable's exact (g=4, noise_scale=1.0,
     n=2 vs n=6) pairing with no extra plumbing.
@@ -156,26 +158,54 @@ action_net/value_net_out heads.
 
 Gradient-starvation seam
 -------------------------
-`inactive_group_reward` (default 0.0) is the reward given to whichever
-group is "off" during a phase - it's a real parameter on
-`run_shared_machinery_experiment()`, not a hardcoded 0, specifically so a
-future call can pass e.g. -0.1 or -1.0 to actively penalize the inactive
-group's actions (to combat gradient starvation on that group's action
-block) instead of just removing its upside. The default keeps it at
-exactly 0.0 - this is NOT implemented as the default per current
-instructions, just left as a documented, already-wired seam.
+Each phase's "off" group gets its own reward, via two SEPARATE
+parameters rather than one shared `inactive_group_reward`:
+`phase1_inactive_reward` (group2's reward while group1 is being trained -
+the "wrong group" during phase 1) and `phase2_inactive_reward` (group1's
+reward while group2 is being trained - the "old group" during phase 2).
+Both default to 0.0 (matching the original single-`inactive_group_reward`
+behavior), but a caller can now push `phase2_inactive_reward` negative
+(e.g. -0.1) to actively penalize the OLD group's actions once training has
+moved on to the new one, without touching phase 1's inactive reward at
+all - this is exactly the "gradient starvation" seam this module used to
+just document without wiring up per-phase.
+
+Post-run hit-rate eval
+-----------------------
+After phase 2 ends (and group1/group2 are restored to their original
+reward values), the function runs a `greedy_dual_evaluate()` pass - the
+same greedy-accuracy convention `trainPPO.evaluate()` uses elsewhere in
+this repo, applied to the actual two-group env this experiment already
+trained on (a single-group eval isn't possible here without changing the
+observation size the network was trained against - see
+`greedy_dual_evaluate()`'s docstring). This directly answers "did the
+model actually switch to the new group, or fail" - not just an aggregate
+hit rate, but SEPARATE accuracy conditioned on which group's action block
+the agent chose to answer in (`hit_rate_group1`/`hit_rate_group2`), plus
+how often it chose each block at all (`choice_rate_group1`/
+`choice_rate_group2`) - a model that's still mostly answering group1's
+block (or answering group2's block but getting it wrong) has failed to
+switch, even if its raw reward looks fine.
 
 Run:  python3 run_shared_machinery_experiment.py
 """
 import csv
 import os
+import sys
 from dataclasses import dataclass, field
 
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from Utilities.bandit_env import HeatmapGroup, MarginGroup
+# 2026-08-19: Utilities/ and trainPPO.py moved into the self-contained
+# M_comparison_background/ subfolder alongside the rest of the
+# run_my_comparisons.py dependency chain. Inserting that folder onto
+# sys.path keeps the imports below resolvable regardless of how this
+# script ends up invoked.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "M_comparison_background"))
+
+from Utilities.bandit_env import BanditEnv, HeatmapGroup, MarginGroup
 from trainPPO import make_env
 
 
@@ -212,9 +242,12 @@ INTERMEDIATE_LAYER_GROUPS = (
 SUMMARY_FIELDNAMES = [
     "group1_type", "group1_noise_scale", "group1_n", "group1_g", "group1_value",
     "group2_type", "group2_noise_scale", "group2_n", "group2_g", "group2_value",
-    "incorrect_reward", "inactive_group_reward",
+    "incorrect_reward", "phase1_inactive_reward", "phase2_inactive_reward",
     "phase_timesteps", "switch_timestep", "end_timestep",
-] + [f"diff_{g}" for g in WEIGHT_GROUP_PREDICATES] + [f"n_params_{g}" for g in WEIGHT_GROUP_PREDICATES]
+] + [f"diff_{g}" for g in WEIGHT_GROUP_PREDICATES] + [f"n_params_{g}" for g in WEIGHT_GROUP_PREDICATES] + [
+    "hit_rate_overall", "hit_rate_group1", "hit_rate_group2",
+    "choice_rate_group1", "choice_rate_group2", "eval_episodes",
+]
 
 
 def _snapshot_params(policy):
@@ -241,6 +274,65 @@ def diff_norm(before: dict, after: dict, predicate) -> tuple[float, int]:
     return total ** 0.5, n_params
 
 
+def greedy_dual_evaluate(model, group1, group2, incorrect_reward, episodes=500):
+    """Greedy accuracy of `model` on the SAME two-group BanditEnv it was
+    trained on (group1, group2, at whatever `.value` each currently
+    holds - callers should restore both to their real/original values
+    before calling this, exactly as `run_shared_machinery_experiment`
+    does). This can't be simplified to a single-group eval (e.g. reusing
+    `trainPPO.evaluate(model, [group2], ...)` alone to check "did it learn
+    group2") because the POLICY NETWORK's input layer was built for the
+    concatenated two-group observation size - dropping to a one-group env
+    would change the observation shape and the model couldn't even run.
+
+    Returns a dict:
+      hit_rate_overall:   fraction of all `episodes` answered correctly
+                          (matches trainPPO.evaluate()'s convention).
+      hit_rate_group1/2:  accuracy CONDITIONED on the agent having chosen
+                          that group's action block that episode (i.e.
+                          "when it went for group N, how often was it
+                          right") - 0.0 (not NaN) if the agent never chose
+                          that block in any of the `episodes` episodes, so
+                          this is always a plain float, never None/NaN.
+      choice_rate_group1/2: fraction of all episodes where the agent chose
+                          that group's action block at all (whether or not
+                          it got the label right) - lets you see behavioral
+                          collapse (e.g. "still answering group1's block
+                          90% of the time") separately from accuracy.
+      episodes:           the `episodes` argument, echoed back for
+                          convenience when writing summary rows.
+
+    "did the model actually switch to the new group, or just fail" reads
+    directly off hit_rate_group2 (and choice_rate_group2) after phase 2 -
+    high choice_rate_group2 with low hit_rate_group2 means it started
+    answering the new group's block but got the label wrong; low
+    choice_rate_group2 means it never even switched to trying."""
+    env = BanditEnv(groups=[group1, group2], incorrect_reward=incorrect_reward)
+
+    correct = 0
+    chosen_counts = [0, 0]
+    correct_counts = [0, 0]
+    for _ in range(episodes):
+        obs, _ = env.reset()
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, terminated, truncated, info = env.step(int(action))
+        correct += int(info["correct"])
+        chosen_group = info["chosen_group"]
+        if chosen_group is not None:
+            chosen_counts[chosen_group] += 1
+            if info["matched_group"] == chosen_group:
+                correct_counts[chosen_group] += 1
+
+    return {
+        "hit_rate_overall": correct / episodes,
+        "hit_rate_group1": (correct_counts[0] / chosen_counts[0]) if chosen_counts[0] else 0.0,
+        "hit_rate_group2": (correct_counts[1] / chosen_counts[1]) if chosen_counts[1] else 0.0,
+        "choice_rate_group1": chosen_counts[0] / episodes,
+        "choice_rate_group2": chosen_counts[1] / episodes,
+        "episodes": episodes,
+    }
+
+
 @dataclass
 class SharedMachineryResult:
     model: PPO
@@ -250,13 +342,15 @@ class SharedMachineryResult:
     w2: dict = field(repr=False)
     diffs: dict[str, float] = field(default_factory=dict)
     n_params: dict[str, int] = field(default_factory=dict)
+    hit_rates: dict[str, float] = field(default_factory=dict)
 
 
 def run_shared_machinery_experiment(
     group1,
     group2,
     incorrect_reward: float = 0.0,
-    inactive_group_reward: float = 0.0,
+    phase1_inactive_reward: float = 0.0,
+    phase2_inactive_reward: float = 0.0,
     n_envs: int = 8,
     phase_timesteps: int = 200_000,
     label: str = "shared_machinery",
@@ -278,11 +372,12 @@ def run_shared_machinery_experiment(
     weights_dir: str = "weights",
     save_checkpoints: bool = True,
     progress_bar: bool = False,
+    eval_episodes: int = 500,
 ) -> SharedMachineryResult:
     """Run the two-phase reward-switch training protocol described in this
     module's docstring and return the |w2 - w1| weight-drift breakdown.
 
-    `group1`/`group2` are ComplexityGroup instances (e.g. two HeatmapGroup
+    `group1`/`group2` are AlternatingGroup instances (e.g. two HeatmapGroup
     configs, the same way run_p_curve_experiments.py's TESTS build a
     fixed_group/variable_group pair) - their `.value` attributes ARE
     mutated during the run (phase 1: group1 at its original value, group2
@@ -297,6 +392,15 @@ def run_shared_machinery_experiment(
     number of env-steps run in each phase will be phase_timesteps rounded
     UP to the next full `n_steps * n_envs` rollout (see module docstring),
     reported exactly via `switch_timestep`/`end_timestep`.
+
+    `phase1_inactive_reward`/`phase2_inactive_reward`: the reward given to
+    whichever group is "off" during phase 1 / phase 2 respectively (both
+    default 0.0, matching this function's original single-
+    `inactive_group_reward` behavior). Kept as two separate parameters
+    (not one shared value) specifically so a caller can penalize the OLD
+    group during phase 2 (e.g. `phase2_inactive_reward=-0.1`) without
+    also changing phase 1's inactive reward - see the module docstring's
+    "Gradient-starvation seam" section.
     """
     original_value1 = group1.value
     original_value2 = group2.value
@@ -306,8 +410,8 @@ def run_shared_machinery_experiment(
     # the n_envs BanditEnv copies below (BanditEnv.__init__ keeps this
     # exact object rather than copying it when given a sequence - see
     # Utilities/bandit_env.py). This is what lets the "inactive" group's
-    # WRONG-answer reward be flipped to `inactive_group_reward` too (not
-    # just its `.value`/correct-answer reward) with a single assignment
+    # WRONG-answer reward be flipped to that phase's inactive reward too
+    # (not just its `.value`/correct-answer reward) with a single assignment
     # below, immediately visible to every parallel env - the same
     # broadcast-via-shared-reference trick already used for `group.value`.
     incorrect_rewards = [incorrect_reward, incorrect_reward]
@@ -347,7 +451,7 @@ def run_shared_machinery_experiment(
     # Group 1 keeps its normal correct/incorrect rewards; group 2 is
     # "inactive" - BOTH its correct-answer reward (`.value`) AND its
     # incorrect-answer reward (`incorrect_rewards[1]`) are forced to
-    # `inactive_group_reward`, so picking anything in group 2's block (its
+    # `phase1_inactive_reward`, so picking anything in group 2's block (its
     # label or not) gives the same signal. This matters once
     # `inactive_group_reward` is a nonzero/negative "gradient starvation"
     # value: without also overriding the incorrect-answer reward, an
@@ -355,9 +459,9 @@ def run_shared_machinery_experiment(
     # 3 out of every g wrong-but-in-block guesses, diluting the intended
     # penalty.
     group1.value = original_value1
-    group2.value = inactive_group_reward
+    group2.value = phase1_inactive_reward
     incorrect_rewards[0] = incorrect_reward
-    incorrect_rewards[1] = inactive_group_reward
+    incorrect_rewards[1] = phase1_inactive_reward
     model.learn(
         total_timesteps=phase_timesteps,
         reset_num_timesteps=True,
@@ -380,9 +484,9 @@ def run_shared_machinery_experiment(
     # twice as long as intended - confirmed by inspecting
     # stable_baselines3/common/base_class.py's _setup_learn and verified
     # against a real run's num_timesteps here).
-    group1.value = inactive_group_reward
+    group1.value = phase2_inactive_reward
     group2.value = original_value2
-    incorrect_rewards[0] = inactive_group_reward
+    incorrect_rewards[0] = phase2_inactive_reward
     incorrect_rewards[1] = incorrect_reward
     model.learn(
         total_timesteps=phase_timesteps,
@@ -399,7 +503,9 @@ def run_shared_machinery_experiment(
     # `incorrect_rewards` is only referenced by this run's envs, that list
     # too - though nothing outside this function keeps a reference to it)
     # behave normally if the caller reuses group1/group2 afterwards (e.g.
-    # for a fresh eval env).
+    # for a fresh eval env) - and so the post-run hit-rate eval right below
+    # measures accuracy under the REAL reward structure, not whatever
+    # phase 2 happened to end on.
     group1.value = original_value1
     group2.value = original_value2
     incorrect_rewards[0] = incorrect_reward
@@ -412,6 +518,10 @@ def run_shared_machinery_experiment(
         diffs[group_name] = norm
         n_params[group_name] = count
 
+    hit_rates = greedy_dual_evaluate(
+        model, group1, group2, incorrect_reward, episodes=eval_episodes,
+    )
+
     return SharedMachineryResult(
         model=model,
         switch_timestep=switch_timestep,
@@ -420,6 +530,7 @@ def run_shared_machinery_experiment(
         w2=w2,
         diffs=diffs,
         n_params=n_params,
+        hit_rates=hit_rates,
     )
 
 
@@ -459,7 +570,8 @@ def append_summary_row(
     group1,
     group2,
     incorrect_reward: float,
-    inactive_group_reward: float,
+    phase1_inactive_reward: float,
+    phase2_inactive_reward: float,
     phase_timesteps: int,
     result: SharedMachineryResult,
 ) -> None:
@@ -471,7 +583,8 @@ def append_summary_row(
         **_group_spec_dict("group1", group1),
         **_group_spec_dict("group2", group2),
         "incorrect_reward": incorrect_reward,
-        "inactive_group_reward": inactive_group_reward,
+        "phase1_inactive_reward": phase1_inactive_reward,
+        "phase2_inactive_reward": phase2_inactive_reward,
         "phase_timesteps": phase_timesteps,
         "switch_timestep": result.switch_timestep,
         "end_timestep": result.end_timestep,
@@ -479,6 +592,12 @@ def append_summary_row(
     for group_name in WEIGHT_GROUP_PREDICATES:
         row[f"diff_{group_name}"] = result.diffs[group_name]
         row[f"n_params_{group_name}"] = result.n_params[group_name]
+    row["hit_rate_overall"] = result.hit_rates["hit_rate_overall"]
+    row["hit_rate_group1"] = result.hit_rates["hit_rate_group1"]
+    row["hit_rate_group2"] = result.hit_rates["hit_rate_group2"]
+    row["choice_rate_group1"] = result.hit_rates["choice_rate_group1"]
+    row["choice_rate_group2"] = result.hit_rates["choice_rate_group2"]
+    row["eval_episodes"] = result.hit_rates["episodes"]
 
     file_is_new = not os.path.exists(csv_path)
     os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
@@ -498,6 +617,19 @@ def print_result_summary(result: SharedMachineryResult) -> None:
             f"{group_name:<14}{result.diffs[group_name]:>12.4f}"
             f"{result.n_params[group_name]:>12d}{tag}"
         )
+    hr = result.hit_rates
+    print(
+        f"\nhit_rate_overall={hr['hit_rate_overall']:.3f}  "
+        f"(over {hr['episodes']} eval episodes)"
+    )
+    print(
+        f"  group1: hit_rate={hr['hit_rate_group1']:.3f}  "
+        f"choice_rate={hr['choice_rate_group1']:.3f}"
+    )
+    print(
+        f"  group2: hit_rate={hr['hit_rate_group2']:.3f}  "
+        f"choice_rate={hr['choice_rate_group2']:.3f}"
+    )
 
 
 if __name__ == "__main__":
@@ -514,7 +646,8 @@ if __name__ == "__main__":
         group1,
         group2,
         incorrect_reward=0.0,
-        inactive_group_reward=0.0,  # default seam - pass e.g. -0.1/-1.0 later if needed
+        phase1_inactive_reward=0.0,
+        phase2_inactive_reward=0.0,  # pass e.g. -0.1 to penalize the OLD group in phase 2
         phase_timesteps=200_000,
         label="shared_machinery_heatmap_n2_vs_n6",
         progress_bar=True,
@@ -526,7 +659,8 @@ if __name__ == "__main__":
         group1,
         group2,
         incorrect_reward=0.0,
-        inactive_group_reward=0.0,
+        phase1_inactive_reward=0.0,
+        phase2_inactive_reward=0.0,
         phase_timesteps=200_000,
         result=result,
     )

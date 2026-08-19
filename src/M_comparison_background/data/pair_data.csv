@@ -1,0 +1,60 @@
+spec_fixed,spec_variable,label,M,beta,certified,status,diff_whole_model,diff_actor,diff_critic,diff_policy_net_0,diff_policy_net_2,diff_action_net,diff_value_net_0,diff_value_net_2,diff_value_net_out,source_file
+"('margin', 1.0, 1.0, 0.0, 4)","('margin', 2.0, 1.0, 0.0, 4)",k_fixed1_k_variable2,1.0299717639322616,79.66244462367285,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 2.0, 1.0, 0.0, 4)","('margin', 3.0, 1.0, 0.0, 4)",k_fixed2_k_variable3,1.0498731572965168,30.108603296111838,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 3.0, 1.0, 0.0, 4)","('margin', 5.0, 1.0, 0.0, 4)",k_fixed3_k_variable5,1.135010131430796,35.24437152765032,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 5.0, 1.0, 0.0, 4)","('margin', 7.0, 1.0, 0.0, 4)",k_fixed5_k_variable7,1.102983878245002,38.796926445390575,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 7.0, 1.0, 0.0, 4)","('margin', 10.0, 1.0, 0.0, 4)",k_fixed7_k_variable10,1.1012492551671105,112.07447201528076,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 10.0, 1.0, 0.0, 4)","('margin', 13.0, 1.0, 0.0, 4)",k_fixed10_k_variable13,1.070423747601157,38.9029663210021,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 13.0, 1.0, 0.0, 4)","('margin', 16.0, 1.0, 0.0, 4)",k_fixed13_k_variable16,1.0436842810439206,26.10811101897247,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 16.0, 1.0, 0.0, 4)","('margin', 20.0, 1.0, 0.0, 4)",k_fixed16_k_variable20,1.0433168187241038,25.70551840993829,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 20.0, 1.0, 0.0, 4)","('margin', 25.0, 1.0, 0.0, 4)",k_fixed20_k_variable25,1.0392263288258772,18.446930161686826,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 1.0, 1.0, 0.0, 4)","('margin', 5.0, 1.0, 0.0, 4)",k_fixed1_k_variable5,1.3261344000227575,7.534859359771521,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 10.0, 1.0, 0.0, 4)","('margin', 25.0, 1.0, 0.0, 4)",k_fixed10_k_variable25,1.1817479017667911,24.46105264173158,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 3.0, 1.0, 0.0, 4)","('margin', 13.0, 1.0, 0.0, 4)", n/a,1.4183872763465817,11.594807831994297,True, ok,,,,,,,,,,indifference_data.csv
+"('margin', 9.0, 1.0, 0.0, 4)","('margin', 14.0, 1.0, 0.0, 4)",k_fixed9_k_variable14,1.1078778470484143,109.7671283034336,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 13.0, 1.0, 0.0, 4)","('margin', 18.0, 1.0, 0.0, 4)",k_fixed13_k_variable18,1.070423747601157,38.9029663210021,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 4.0, 1.0, 0.0, 4)","('margin', 22.0, 1.0, 0.0, 4)",k_fixed4_k_variable22,1.3896682297951528,23.634569639338025,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 2.0, 1.0, 0.0, 4)","('margin', 9.0, 1.0, 0.0, 4)",k_fixed2_k_variable9,1.4039815625635883,49.76122107228664,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 2.0, 1.0, 0.0, 4)","('margin', 10.0, 1.0, 0.0, 4)",k_fixed2_k_variable10,1.4484306751157634,9.091751744991225,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 5.0, 1.0, 0.0, 4)","('margin', 25.0, 1.0, 0.0, 4)",k_fixed5_k_variable25,1.3385742768597724,31.84770528216009,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 16.0, 1.0, 0.0, 4)","('margin', 18.0, 1.0, 0.0, 4)",k_fixed16_k_variable18,1.0188634202534417,38.13316642041019,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 2.0, 1.0, 0.0, 4)","('margin', 5.0, 1.0, 0.0, 4)",k_fixed2_k_variable5,1.189854012502157,20.891665576340337,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 9.0, 1.0, 0.0, 4)","('margin', 2.0, 1.0, 0.0, 4)",k_fixedmargin-9_k_variablemargin-2,0.7117259918374386,22.61228024947988,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 25.0, 1.0, 0.0, 4)","('margin', 5.0, 1.0, 0.0, 4)",k_fixedmargin-25_k_variablemargin-5,0.7488304600067317,86.67174407688196,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 18.0, 1.0, 0.0, 4)","('margin', 16.0, 1.0, 0.0, 4)",k_fixedmargin-18_k_variablemargin-16,0.9762918630164742,34.13625161665352,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 1.0, 1.0, 0.0, 4)","('heatmap', 0.0, 3, 4)",k_fixedmargin-1_k_variableheatmap-0.0-3,0.9876493654625398,105.92668099699742,True,ok,,,,,,,,,,indifference_data.csv
+"('heatmap', 0.0, 3, 4)","('margin', 1.0, 1.0, 0.0, 4)",k_fixedheatmap-0.0-3_k_variablemargin-1,1.0127289616903976,117.63172441553807,True,ok,,,,,,,,,,indifference_data.csv
+"('heatmap', 2.0, 3, 4)","('margin', 9.0, 1.0, 0.0, 4)",k_fixedheatmap-2.0-3_k_variablemargin-9,2.9487496625649525,4.3092175652854525,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 3.0, 1.0, 0.0, 4)","('heatmap', 1.5, 3, 4)",k_fixedmargin-3_k_variableheatmap-1.5-3,0.3740501347150509,171.71346112055116,True,ok,,,,,,,,,,indifference_data.csv
+"('heatmap', 0.0, 3, 4)","('heatmap', 0.5, 3, 4)",k_fixedheatmap-0.0-3_k_variableheatmap-0.5-3,0.9966765365542852,186.31151697595877,True,ok,,,,,,,,,,indifference_data.csv
+"('heatmap', 0.0, 3, 4)","('heatmap', 1.0, 3, 4)",k_fixedheatmap-0.0-3_k_variableheatmap-1.0-3,0.9890828626697648,89.91385727428298,True,ok,,,,,,,,,,indifference_data.csv
+"('heatmap', 0.0, 3, 4)","('heatmap', 2.0, 3, 4)",k_fixedheatmap-0.0-3_k_variableheatmap-2.0-3,0.821273692982765,7.650559705721641,True,ok,,,,,,,,,,indifference_data.csv
+"('heatmap', 0.5, 3, 4)","('heatmap', 1.5, 3, 4)",k_fixedheatmap-0.5-3_k_variableheatmap-1.5-3,0.996522290399978,107.52309548413857,True,ok,,,,,,,,,,indifference_data.csv
+"('heatmap', 1.0, 3, 4)","('heatmap', 2.0, 3, 4)",k_fixedheatmap-1.0-3_k_variableheatmap-2.0-3,0.999524956657424,84.549492744576,True,ok,,,,,,,,,,indifference_data.csv
+"('heatmap', 0.25, 3, 4)","('heatmap', 1.75, 3, 4)",k_fixedheatmap-0.25-3_k_variableheatmap-1.75-3,0.9787054858248452,25.48955595499896,True,ok,,,,,,,,,,indifference_data.csv
+"('heatmap', 0.75, 3, 4)","('heatmap', 1.25, 3, 4)",k_fixedheatmap-0.75-3_k_variableheatmap-1.25-3,0.9987080353287072,109.75691574042918,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 13.0, 1.0, 0.0, 4)","('heatmap', 1.0, 3, 4)",k_fixedmargin-13_k_variableheatmap-1.0-3,0.334291206821336,39.86874525200472,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 25.0, 1.0, 0.0, 4)","('heatmap', 0.0, 3, 4)",k_fixedmargin-25_k_variableheatmap-0.0-3,0.3984107034383011,32.88302377212533,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 13.0, 10.0, 0.0, 4)","('heatmap', 1.0, 3, 4)",k_fixedmargin_scaled-13-10.0_k_variableheatmap-1.0-3,0.7294024754687607,12.707452351195874,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 25.0, 10.0, 0.0, 4)","('heatmap', 0.0, 3, 4)",k_fixedmargin_scaled-25-10.0_k_variableheatmap-0.0-3,0.704104139716502,22.309065196292885,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 13.0, 10.0, 0.0, 4)","('heatmap', 0.0, 3, 4)",k_fixedmargin_scaled-13-10.0_k_variableheatmap-0.0-3,0.8728535756963971,82.03328646557453,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 25.0, 10.0, 0.0, 4)","('heatmap', 1.0, 3, 4)",k_fixedmargin_scaled-25-10.0_k_variableheatmap-1.0-3,0.6022062100245644,17.115535231410963,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 13.0, 1.0, 0.0, 4)","('margin', 13.0, 10.0, 0.0, 4)",k_fixedmargin-13_k_variablemargin_scaled-13-10.0,0.5790415171257262,27.16262882964056,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 22.0, 1.0, 0.0, 4)","('margin', 22.0, 10.0, 0.0, 4)",k_fixedmargin-22_k_variablemargin_scaled-22-10.0,0.6098836985567974,17.65202946116137,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 2.0, 1.0, 0.0, 4)","('margin', 20.0, 10.0, 0.0, 4)",k_fixedmargin-2_k_variablemargin_scaled-20-10.0,0.8701628056301446,30.400520554401197,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 2.0, 1.0, 0.0, 4)","('margin', 17.0, 10.0, 0.0, 4)",k_fixedmargin-2_k_variablemargin_scaled-17-10.0,0.859917104031791,10.123659527680273,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 4.0, 1.0, 0.0, 4)","('margin', 24.0, 10.0, 0.0, 4)",k_fixedmargin-4_k_variablemargin_scaled-24-10.0,0.7158971676140138,22.30213644546105,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 2.0, 1.0, 0.0, 4)","('margin', 21.0, 10.0, 0.0, 4)",k_fixedmargin-2_k_variablemargin_scaled-21-10.0,0.8839910245282808,8.791041885206303,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 1.0, 1.0, 0.0, 4)","('margin', 1.0, 0.1, 0.0, 4)",k_fixedmargin-1_k_variablemargin_scaled-1-0.1,2.2197461194059365,4.735564663849567,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 5.0, 1.0, 0.0, 4)","('margin', 5.0, 0.1, 0.0, 4)",k_fixedmargin-5_k_variablemargin_scaled-5-0.1,1.7394369273553938,10.614834385781007,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 25.0, 1.0, 0.0, 4)","('margin', 1.0, 0.1, 0.0, 4)",k_fixedmargin-25_k_variablemargin_scaled-1-0.1,1.0270527965208365,21.82427717128302,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 10.0, 1.0, 0.0, 4)","('margin', 3.0, 0.1, 0.0, 4)",k_fixedmargin-10_k_variablemargin_scaled-3-0.1,1.4725134529930166,141.76970042200264,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 1.0, 0.1, 0.0, 4)","('margin', 10.0, 0.1, 0.0, 4)",k_fixedmargin_scaled-1-0.1_k_variablemargin_scaled-10-0.1,1.5253243590182883,14.97652544207228,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 8.0, 0.15, 0.0, 4)","('margin', 8.0, 1.6, 0.0, 4)",k_fixedmargin_scaled-8-0.15_k_variablemargin_scaled-8-1.6,0.5895416041090258,26.837436207732317,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 15.0, 0.25, 0.0, 4)","('margin', 15.0, 2.5, 0.0, 4)",k_fixedmargin_scaled-15-0.25_k_variablemargin_scaled-15-2.5,0.6194537696639213,24.09122552006234,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 15.0, 0.4, 0.0, 4)","('margin', 15.0, 4.0, 0.0, 4)",k_fixedmargin_scaled-15-0.4_k_variablemargin_scaled-15-4.0,0.6055864898143444,54.5169274877767,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 15.0, 0.65, 0.0, 4)","('margin', 15.0, 6.5, 0.0, 4)",k_fixedmargin_scaled-15-0.65_k_variablemargin_scaled-15-6.5,0.5976334912203825,45.542953671872176,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 15.0, 0.4, 0.0, 4)","('margin', 15.0, 1.6, 0.0, 4)",k_fixedmargin_scaled-15-0.4_k_variablemargin_scaled-15-1.6,0.7057557969294924,19.604191966715884,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 15.0, 1.6, 0.0, 4)","('margin', 15.0, 4.0, 0.0, 4)",k_fixedmargin_scaled-15-1.6_k_variablemargin_scaled-15-4.0,0.76836677723032,18.96972472623083,True,ok,,,,,,,,,,indifference_data.csv
+"('margin', 1.0, 1.0, 0.0, 4)","('margin', 4.0, 1.0, 0.0, 4)",,,,,,,,,,,,,,,run_pipeline.py
+"('heatmap', 1.0, 2, 4)","('heatmap', 1.0, 6, 4)",,,,,,,,,,,,,,,run_pipeline.py

@@ -1,11 +1,20 @@
 """Run the "shared machinery" weight-difference-norm check (see
-run_shared_machinery_experiment.py) 10 times for EVERY comparison stored
-in Utilities/indifference_data.py's indifference_data.csv - i.e. every
+run_shared_machinery_experiment.py) 20 times for EVERY comparison stored
+in legacy_csv_data.py's indifference_data.csv - i.e. every
 (spec_fixed, spec_variable) pair with a certified M ("midpoint") that
 survived find_indifference_reward.py/run_indifference_batch.py's
 confidence-interval-based estimation - 5 replicates with that pair's
 fixed side trained first (phase 1) / variable side second, and 5 with the
-order reversed, "just in case order matters" per the request.
+order reversed, "just in case order matters" per the request - each of
+those 10 runs done TWICE more (20 total per comparison): once with
+`phase2_inactive_reward=0.0` (the OLD group - whichever went first -
+gets no reward at all once phase 2 starts, the original behavior) and
+once with `phase2_inactive_reward=-0.1` (the OLD group is actively
+penalized for still answering its own block once phase 2 starts, per
+direct request). `phase1_inactive_reward` is always 0.0 in BOTH versions -
+only phase 2's penalty is varied; phase 1's "wrong group" (whichever
+group hasn't gone first yet) is never penalized, only ever left at 0
+reward, in either version.
 
 THIS IS NOT run_p_curve_experiments.py's TESTS list. TESTS is a small
 (7-entry) illustrative set used for a completely different pipeline (the
@@ -44,32 +53,44 @@ Reconstructing actual group objects from a stored spec tuple reuses
 run_indifference_batch.py's own `mixed_group_factory` (not reimplemented
 here) - the exact same ("margin", k, s, err) / ("heatmap", noise_scale,
 n) -> Group dispatch already used to run comparisons in the first place -
-at g=Utilities.weight_norm_data.MARGIN_G, the project-wide constant every
-spec in indifference_data.csv implicitly assumes (specs never carry g
-themselves - see Utilities/weight_norm_data.py's spec_from_group).
+at g=4, the project-wide constant every spec in indifference_data.csv
+implicitly assumes (specs never carry g themselves).
 
 Output: eval_logs/weight_diff_norm_replicates.csv, one row per
-(comparison, order, replicate). `spec_fixed`/`spec_variable`/`M`/`beta`/
-`certified`/`status`/`label`/`source_file` are carried straight through
-from the indifference_data.csv row so this CSV can be joined back to it
-by (spec_fixed, spec_variable) once you decide how you want the two
-merged. group1/group2 columns record which group was ACTUALLY trained
-first (phase1) each row - group1 = the fixed-spec group when
-order="fixed_first", group1 = the variable-spec group when
+(comparison, order, phase2_inactive_reward, replicate). `spec_fixed`/
+`spec_variable`/`M`/`beta`/`certified`/`status`/`label`/`source_file` are
+carried straight through from the indifference_data.csv row so this CSV
+can be joined back to it by (spec_fixed, spec_variable) once you decide
+how you want the two merged. group1/group2 columns record which group
+was ACTUALLY trained first (phase1) each row - group1 = the fixed-spec
+group when order="fixed_first", group1 = the variable-spec group when
 order="variable_first" - so every row's group1/diff_* columns line up
 consistently with "whichever group went first," not with the comparison's
 own fixed/variable labeling. A separate `fixed_group_phase` column
 ("phase1"/"phase2") makes it easy to regroup by the comparison's own
-spec_fixed/spec_variable semantics afterwards.
+spec_fixed/spec_variable semantics afterwards. `hit_rate_group1`/
+`hit_rate_group2`/`choice_rate_group1`/`choice_rate_group2`/
+`hit_rate_overall` are the post-run greedy-eval columns from
+run_shared_machinery_experiment.py's `greedy_dual_evaluate()` - group2
+here is always "whichever group trained SECOND" (see group1/group2 above),
+so `hit_rate_group2` directly answers "did it switch to the new group, or
+fail" for that row.
 
 Run:  python3 run_weight_diff_norm_replicates.py [--quick] [--limit N]
 """
 import argparse
 import csv
 import os
+import sys
 
-from Utilities.indifference_data import RECORDS as INDIFFERENCE_RECORDS
-from Utilities.weight_norm_data import MARGIN_G
+# 2026-08-19: data/ and run_indifference_batch.py moved into the
+# self-contained M_comparison_background/ subfolder alongside the rest of
+# the run_my_comparisons.py dependency chain. Inserting that folder onto
+# sys.path keeps the imports below resolvable regardless of how this
+# script ends up invoked.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "M_comparison_background"))
+
+from data.legacy_csv_data import INDIFFERENCE_RECORDS
 from run_indifference_batch import mixed_group_factory
 from run_shared_machinery_experiment import (
     run_shared_machinery_experiment, WEIGHT_GROUP_PREDICATES, _group_spec_dict,
@@ -77,22 +98,33 @@ from run_shared_machinery_experiment import (
 
 OUT_PATH = "eval_logs/weight_diff_norm_replicates.csv"
 
-N_REPLICATES_PER_ORDER = 5   # -> 10 total runs per comparison (5 + 5), per the request
+N_REPLICATES_PER_ORDER = 5   # -> 10 runs per comparison per reward version (5 + 5)
 PHASE_TIMESTEPS = 200_000    # matches this project's normal per-run budget
 BASE_SEED = 0
 INCORRECT_REWARD = 0.0       # matches every comparison in this project's convention
+PHASE1_INACTIVE_REWARD = 0.0  # always 0 in both reward versions - only phase 2 varies
+# The two versions of the experiment, per direct request: the OLD group
+# (whichever trained first) gets no reward at all once phase 2 starts
+# (matches the original/default behavior), vs. actively penalized for
+# still answering its own block once phase 2 starts. This DOUBLES the
+# total run count (2 reward versions x 2 orders x N_REPLICATES_PER_ORDER
+# per comparison, i.e. 20 total runs/comparison at the default 5).
+PHASE2_INACTIVE_REWARDS = (0.0, -0.1)
 
 FIELDNAMES = [
     "spec_fixed", "spec_variable", "label", "M", "beta", "certified",
     "status", "source_file",
-    "order", "replicate", "seed",
+    "order", "replicate", "seed", "phase2_inactive_reward",
     "fixed_group_phase",  # "phase1" if the comparison's fixed side went first, else "phase2"
 ] + [f"group1_{k}" for k in ("type", "noise_scale", "n", "g", "value")] + [
     f"group2_{k}" for k in ("type", "noise_scale", "n", "g", "value")
 ] + [
-    "incorrect_reward", "inactive_group_reward", "phase_timesteps",
+    "incorrect_reward", "phase1_inactive_reward", "phase_timesteps",
     "switch_timestep", "end_timestep",
-] + [f"diff_{g}" for g in WEIGHT_GROUP_PREDICATES]
+] + [f"diff_{g}" for g in WEIGHT_GROUP_PREDICATES] + [
+    "hit_rate_overall", "hit_rate_group1", "hit_rate_group2",
+    "choice_rate_group1", "choice_rate_group2", "eval_episodes",
+]
 
 
 def _spec_cols(prefix, group):
@@ -115,7 +147,8 @@ def _comparison_label(record) -> str:
 
 
 def run_all(records=None, phase_timesteps=PHASE_TIMESTEPS,
-            n_replicates_per_order=N_REPLICATES_PER_ORDER, n_envs=8, n_steps=512):
+            n_replicates_per_order=N_REPLICATES_PER_ORDER, n_envs=8, n_steps=512,
+            phase2_inactive_rewards=PHASE2_INACTIVE_REWARDS, eval_episodes=500):
     records = INDIFFERENCE_RECORDS if records is None else records
 
     os.makedirs(os.path.dirname(OUT_PATH) or ".", exist_ok=True)
@@ -125,90 +158,104 @@ def run_all(records=None, phase_timesteps=PHASE_TIMESTEPS,
     if file_is_new:
         writer.writeheader()
 
-    total_runs = len(records) * n_replicates_per_order * 2
+    total_runs = len(records) * n_replicates_per_order * 2 * len(phase2_inactive_rewards)
     run_num = 0
 
     for record in records:
         name = _comparison_label(record)
 
-        for order in ("fixed_first", "variable_first"):
-            for replicate in range(n_replicates_per_order):
-                run_num += 1
-                seed = BASE_SEED + replicate  # same seed reused across BOTH orders,
-                # so replicate i in "fixed_first" and replicate i in
-                # "variable_first" differ ONLY in order, not in random
-                # seed too - isolates order as the sole variable.
+        for phase2_inactive_reward in phase2_inactive_rewards:
+            for order in ("fixed_first", "variable_first"):
+                for replicate in range(n_replicates_per_order):
+                    run_num += 1
+                    seed = BASE_SEED + replicate  # same seed reused across BOTH orders
+                    # AND both phase2_inactive_reward versions, so replicate i
+                    # differs from replicate i in any other (order,
+                    # phase2_inactive_reward) combo ONLY in that one variable -
+                    # isolates each dimension as the sole difference.
 
-                # Fresh group instances every replicate (mixed_group_
-                # factory builds a brand-new object each call, and
-                # run_shared_machinery_experiment mutates-then-restores
-                # .value anyway, but a fresh instance per run avoids any
-                # possibility of state leaking between runs).
-                fixed_group = mixed_group_factory(MARGIN_G, record.spec_fixed, 1.0)
-                variable_group = mixed_group_factory(MARGIN_G, record.spec_variable, 1.0)
+                    # Fresh group instances every replicate (mixed_group_
+                    # factory builds a brand-new object each call, and
+                    # run_shared_machinery_experiment mutates-then-restores
+                    # .value anyway, but a fresh instance per run avoids any
+                    # possibility of state leaking between runs).
+                    fixed_group = mixed_group_factory(4, record.spec_fixed, 1.0)
+                    variable_group = mixed_group_factory(4, record.spec_variable, 1.0)
 
-                if order == "fixed_first":
-                    group1, group2 = fixed_group, variable_group
-                    fixed_group_phase = "phase1"
-                else:
-                    group1, group2 = variable_group, fixed_group
-                    fixed_group_phase = "phase2"
+                    if order == "fixed_first":
+                        group1, group2 = fixed_group, variable_group
+                        fixed_group_phase = "phase1"
+                    else:
+                        group1, group2 = variable_group, fixed_group
+                        fixed_group_phase = "phase2"
 
-                result = run_shared_machinery_experiment(
-                    group1,
-                    group2,
-                    incorrect_reward=INCORRECT_REWARD,
-                    inactive_group_reward=0.0,
-                    n_envs=n_envs,
-                    phase_timesteps=phase_timesteps,
-                    n_steps=n_steps,
-                    label=f"wdn_{name}_{order}_{replicate}",
-                    seed=seed,
-                    save_checkpoints=False,
-                    progress_bar=False,
-                )
+                    result = run_shared_machinery_experiment(
+                        group1,
+                        group2,
+                        incorrect_reward=INCORRECT_REWARD,
+                        phase1_inactive_reward=PHASE1_INACTIVE_REWARD,
+                        phase2_inactive_reward=phase2_inactive_reward,
+                        n_envs=n_envs,
+                        phase_timesteps=phase_timesteps,
+                        n_steps=n_steps,
+                        label=f"wdn_{name}_{order}_pen{phase2_inactive_reward}_{replicate}",
+                        seed=seed,
+                        save_checkpoints=False,
+                        progress_bar=False,
+                        eval_episodes=eval_episodes,
+                    )
 
-                row = {
-                    "spec_fixed": record.spec_fixed,
-                    "spec_variable": record.spec_variable,
-                    "label": record.label,
-                    "M": record.M,
-                    "beta": record.beta,
-                    "certified": record.certified,
-                    "status": record.status,
-                    "source_file": record.source_file,
-                    "order": order,
-                    "replicate": replicate,
-                    "seed": seed,
-                    "fixed_group_phase": fixed_group_phase,
-                    "incorrect_reward": INCORRECT_REWARD,
-                    "inactive_group_reward": 0.0,
-                    "phase_timesteps": phase_timesteps,
-                    "switch_timestep": result.switch_timestep,
-                    "end_timestep": result.end_timestep,
-                }
-                row.update(_spec_cols("group1", group1))
-                row.update(_spec_cols("group2", group2))
-                for gname in WEIGHT_GROUP_PREDICATES:
-                    row[f"diff_{gname}"] = result.diffs[gname]
+                    row = {
+                        "spec_fixed": record.spec_fixed,
+                        "spec_variable": record.spec_variable,
+                        "label": record.label,
+                        "M": record.M,
+                        "beta": record.beta,
+                        "certified": record.certified,
+                        "status": record.status,
+                        "source_file": record.source_file,
+                        "order": order,
+                        "replicate": replicate,
+                        "seed": seed,
+                        "phase2_inactive_reward": phase2_inactive_reward,
+                        "fixed_group_phase": fixed_group_phase,
+                        "incorrect_reward": INCORRECT_REWARD,
+                        "phase1_inactive_reward": PHASE1_INACTIVE_REWARD,
+                        "phase_timesteps": phase_timesteps,
+                        "switch_timestep": result.switch_timestep,
+                        "end_timestep": result.end_timestep,
+                    }
+                    row.update(_spec_cols("group1", group1))
+                    row.update(_spec_cols("group2", group2))
+                    for gname in WEIGHT_GROUP_PREDICATES:
+                        row[f"diff_{gname}"] = result.diffs[gname]
+                    row["hit_rate_overall"] = result.hit_rates["hit_rate_overall"]
+                    row["hit_rate_group1"] = result.hit_rates["hit_rate_group1"]
+                    row["hit_rate_group2"] = result.hit_rates["hit_rate_group2"]
+                    row["choice_rate_group1"] = result.hit_rates["choice_rate_group1"]
+                    row["choice_rate_group2"] = result.hit_rates["choice_rate_group2"]
+                    row["eval_episodes"] = result.hit_rates["episodes"]
 
-                writer.writerow(row)
-                f.flush()
+                    writer.writerow(row)
+                    f.flush()
 
-                print(
-                    f"[{run_num}/{total_runs}] {name} order={order} rep={replicate} "
-                    f"seed={seed}: diff_whole_model={result.diffs['whole_model']:.4f} "
-                    f"diff_actor={result.diffs['actor']:.4f} "
-                    f"diff_critic={result.diffs['critic']:.4f}",
-                    flush=True,  # stdout is FULLY buffered (not line-buffered) once
-                    # redirected to a file/pipe instead of a terminal (e.g.
-                    # `nohup ... > log.txt &`) - without this, `tail -f` on
-                    # that log shows nothing for a long time even though
-                    # runs are completing normally, since Python is just
-                    # holding the printed lines in memory until the buffer
-                    # fills. flush=True forces each line out immediately
-                    # regardless of how the script is invoked.
-                )
+                    print(
+                        f"[{run_num}/{total_runs}] {name} order={order} "
+                        f"phase2_inactive_reward={phase2_inactive_reward} rep={replicate} "
+                        f"seed={seed}: diff_whole_model={result.diffs['whole_model']:.4f} "
+                        f"diff_actor={result.diffs['actor']:.4f} "
+                        f"diff_critic={result.diffs['critic']:.4f} "
+                        f"hit_rate_group2={result.hit_rates['hit_rate_group2']:.3f} "
+                        f"choice_rate_group2={result.hit_rates['choice_rate_group2']:.3f}",
+                        flush=True,  # stdout is FULLY buffered (not line-buffered) once
+                        # redirected to a file/pipe instead of a terminal (e.g.
+                        # `nohup ... > log.txt &`) - without this, `tail -f` on
+                        # that log shows nothing for a long time even though
+                        # runs are completing normally, since Python is just
+                        # holding the printed lines in memory until the buffer
+                        # fills. flush=True forces each line out immediately
+                        # regardless of how the script is invoked.
+                    )
 
     f.close()
     print(f"\nWrote {total_runs} rows -> {OUT_PATH}", flush=True)

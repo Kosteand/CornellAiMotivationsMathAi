@@ -7,20 +7,31 @@ not the training code itself.
 
 Run:  python3 run_trainPPO.py
 """
-from Utilities.bandit_env import MarginGroup
+import os
+import sys
+
+# 2026-08-19: groups.py/trainPPO.py moved into the self-contained
+# M_comparison_background/ subfolder alongside the rest of the
+# run_my_comparisons.py dependency chain. Inserting that folder onto
+# sys.path keeps the imports below resolvable regardless of how this
+# script ends up invoked.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "M_comparison_background"))
+
+from groups import AlternatingGroup
 from trainPPO import train
 
 # --- environment config ---
 
-# List of ComplexityGroup(g, k, value) instances passed to BanditEnv.
+# List of AlternatingGroup(g, k, value) instances passed to BanditEnv.
 # g = number of options in the group, k = complexity dial (higher = harder
-# to learn, see ComplexityGroup's docstring), value = reward for matching
+# to learn, see AlternatingGroup's docstring), value = reward for matching
 # that group's label. Two groups here, same g, different k: group 0 is
 # low-frequency/easy (k=1), group 1 is high-frequency/hard (k=25). Nothing
 # in the observation marks which secret belongs to which group - the agent
 # only sees the concatenated secrets.
 GROUPS = [
-    MarginGroup(4, 1, 1)
+    AlternatingGroup(g=4, k=1, value=1.0),
+    AlternatingGroup(g=4, k=25, value=1.0),
 ]
 
 # Reward given when the chosen action doesn't match any group's label.

@@ -62,8 +62,17 @@ Run:  python3 certify_indifference_values.py
 """
 import csv
 import os
+import sys
 import traceback
 from datetime import datetime
+
+# 2026-08-19: find_indifference_reward.py (and the rest of the
+# run_my_comparisons.py dependency chain: groups.py, trainPPO.py,
+# Utilities/, run_indifference_batch.py, data/) moved into its own
+# self-contained M_comparison_background/ subfolder. Inserting that
+# folder onto sys.path keeps the import below resolvable regardless of
+# how this script ends up invoked.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "M_comparison_background"))
 
 from find_indifference_reward import certify_reward, _RunCsvLogger
 

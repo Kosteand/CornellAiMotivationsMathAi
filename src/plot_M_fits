@@ -15,8 +15,25 @@ were hardcoded directly into this file's old `data` list and are not
 recoverable from indifference_data.py, since their original group specs
 were never recorded) - everything from batch_summary_2.csv onward (every
 CSV that tags k_fixed/k_variable with an explicit group spec) is included.
+
+2026-08-19: Utilities.indifference_data / Utilities.weight_norm_data no
+longer exist - both were superseded by the group_data.csv/pair_data.csv/
+predictive_data.csv three-file architecture (see group_data.py/pair_data.py/
+build_predictive_data.py/legacy_csv_data.py). RATIOS is now built by
+_load_ratios() (defined right below the imports), which reads
+predictive_data.csv's already-joined `ratio_*` columns (built by
+build_predictive_data.build_predictive_data()) instead of calling
+idata.all_ratios() directly, and reconstructs the handful of derived
+fields (logM, is_heatmap/is_full_heatmap/is_half_heatmap, tau_diverged)
+that used to come from all_ratios() itself. Every X_COLUMN name below
+(actor_ratio, layer2_ratio, ...) is unchanged - _load_ratios() maps each
+one onto its equivalent predictive_data.csv column (e.g. actor_ratio ->
+ratio_wn_actor), so nothing past this point in the file needed to change.
 """
 
+import ast
+import os
+import sys
 from collections import namedtuple
 
 import numpy as np
@@ -30,15 +47,117 @@ from statsmodels.stats.stattools import durbin_watson, omni_normtest, jarque_ber
 from scipy.optimize import curve_fit
 from scipy import stats
 
-from Utilities import indifference_data as idata
-from Utilities import weight_norm_data as wnd
+# 2026-08-19: data/ (group_data.py + its CSV) now lives inside the
+# self-contained M_comparison_background/ subfolder alongside the rest of
+# the run_my_comparisons.py dependency chain. Inserting that folder onto
+# sys.path keeps `from data.group_data import ...` below resolvable
+# regardless of how this script ends up invoked.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "M_comparison_background"))
+
+from data.group_data import get_group_row
+
+# Maps each old Utilities.indifference_data.all_ratios() ratio-column name
+# (still used as X_COLUMN/ACTOR_RATIO_OPTIONS/measures throughout this
+# file) onto its equivalent column in the current predictive_data.csv
+# (built by build_predictive_data.build_predictive_data(), joining
+# group_data.csv's per-group math-metric/weight-norm/tau-fit columns
+# across each pair_data.csv row - see those modules' docstrings). Only
+# actor_ratio/layer2_ratio/action_net_ratio/total_ratio map onto
+# WEIGHT-NORM columns; avg/max/sum/l1/l2/rms/std_ratio map onto the
+# expected-magnitude ("em_*") columns; tau_ratio maps onto the tau-decay
+# fit.
+_RATIO_COLUMN_MAP = {
+    "actor_ratio": "ratio_wn_actor",
+    "layer2_ratio": "ratio_wn_policy_net_2",
+    "action_net_ratio": "ratio_wn_action_net",
+    "total_ratio": "ratio_wn_whole_model",
+    "tau_ratio": "ratio_fit_tau",
+    "avg_ratio": "ratio_em_avg",
+    "max_ratio": "ratio_em_max",
+    "sum_ratio": "ratio_em_sum",
+    "l1_ratio": "ratio_em_l1",
+    "l2_ratio": "ratio_em_l2",
+    "rms_ratio": "ratio_em_rms",
+    "std_ratio": "ratio_em_std",
+}
+
+
+def _is_heatmap_spec(spec_str: str) -> bool:
+    """Whether a group_data.csv-style cache_key STRING (e.g.
+    "('heatmap', 1.0, 2, 4)") is a HeatmapGroup - just checks the
+    cache_key tuple's first element, same convention groups.py's own
+    _cache_key uses."""
+    return spec_str.startswith("('heatmap'")
+
+
+def _side_tau_diverged(spec_str: str) -> bool:
+    """Same divergence rule legacy_csv_data.WeightNormRecord.tau_diverged
+    used (fit_status='ok' but r_squared<=0.5, or fit_tau non-positive/
+    implausibly large), applied to ONE side of a pair by looking up that
+    side's own row in group_data.csv. Returns True (diverged/unusable) if
+    that group has no row yet, or no fit was ever run for it - same
+    "missing counts as diverged" convention the old WeightNormRecord
+    property used."""
+    row = get_group_row(ast.literal_eval(spec_str))
+    if row is None or row.get("r_squared", "") == "" or row.get("fit_tau", "") == "":
+        return True
+    r_squared = float(row["r_squared"])
+    fit_tau = float(row["fit_tau"])
+    return r_squared <= 0.5 or fit_tau <= 0 or abs(fit_tau) > 1e6
+
+
+_PREDICTIVE_DATA_CSV_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "M_comparison_background", "data", "predictive_data.csv",
+)
+
+
+def _load_ratios(csv_path: str = _PREDICTIVE_DATA_CSV_PATH) -> list[dict]:
+    """Rebuild the RATIOS table this file needs - previously
+    Utilities.indifference_data.all_ratios() - from predictive_data.csv
+    (File 3 of the current three-file architecture), which already has
+    every ratio this file wants as a `ratio_*` column, one row per
+    (spec_fixed, spec_variable) pair with a certified M. Only
+    logM/is_heatmap/is_full_heatmap/is_half_heatmap/tau_diverged are
+    computed here - everything else is a straight column rename via
+    _RATIO_COLUMN_MAP. Rows with no M (pairs never run through an
+    indifference search - see pair_data.py) are dropped, matching
+    all_ratios()'s old "only certified pairs" behavior."""
+    df = pd.read_csv(csv_path)
+    df["M"] = pd.to_numeric(df["M"], errors="coerce")
+    df = df.dropna(subset=["M"])
+
+    rows = []
+    for _, r in df.iterrows():
+        spec_fixed, spec_variable = r["spec_fixed"], r["spec_variable"]
+        fixed_is_heatmap = _is_heatmap_spec(spec_fixed)
+        variable_is_heatmap = _is_heatmap_spec(spec_variable)
+
+        row = {
+            "spec_fixed": spec_fixed,
+            "spec_variable": spec_variable,
+            "M": float(r["M"]),
+            "logM": float(np.log(float(r["M"]))),
+            "is_heatmap": fixed_is_heatmap or variable_is_heatmap,
+            "is_full_heatmap": fixed_is_heatmap and variable_is_heatmap,
+            "is_half_heatmap": fixed_is_heatmap != variable_is_heatmap,
+            "tau_diverged": (
+                _side_tau_diverged(spec_fixed) or _side_tau_diverged(spec_variable)
+            ),
+        }
+        for old_name, new_col in _RATIO_COLUMN_MAP.items():
+            val = r.get(new_col, "")
+            row[old_name] = (
+                float(val) if val not in ("", None) and not pd.isna(val) else float("nan")
+            )
+        rows.append(row)
+    return rows
 
 # ----------------------------------------------------------------------
 # 0. X-AXIS SELECTION - change X_COLUMN to fit/plot log(M) against a
 #    different ratio. Every label, print statement, and the
 #    tau-divergence filter below all derive from this one setting - no
 #    other edits needed to switch axes. Must be one of the columns
-#    Utilities.indifference_data.all_ratios() returns:
+#    _load_ratios() (see above) returns:
 #        "actor_ratio"   - actor network weight_norm ratio (variable/fixed)
 #        "layer2_ratio"  - policy_net.2 (64->32 hidden layer) weight_norm ratio
 #        "action_net_ratio" - output/action_net layer weight_norm ratio
@@ -86,8 +205,8 @@ FIT_EXCLUDE_ALL_HEATMAP = True
 # residuals against the selected model's own fitted log(M) value - the
 # classic "residuals vs fitted" diagnostic. Set it to the name of any
 # ratio column instead (e.g. "max_ratio", "std_ratio", "layer2_ratio",
-# "actor_ratio", ... - anything Utilities.indifference_data.all_ratios()
-# returns) to plot residuals against log(that column) instead - useful
+# "actor_ratio", ... - anything _load_ratios() (see above) returns) to
+# plot residuals against log(that column) instead - useful
 # for checking whether the SELECTED model's residuals correlate with some
 # OTHER predictor besides the one it was actually fit on (e.g. does a
 # model fit on actor_ratio still have a pattern in its residuals when
@@ -101,7 +220,8 @@ RESIDUAL_X_COLUMN = "y_pred"
 # whether some OTHER single summary statistic of the group's observation
 # proxy predicts log(M) as well as (or better than) X_COLUMN. Tests six
 # candidate proxy-magnitude measures, all sourced from
-# Utilities.weight_norm_data.expected_magnitude(): E[average entry]
+# group_data.py's build_group_row()/_math_metric_columns() (via each
+# side's em_* columns in group_data.csv): E[average entry]
 # (avg_ratio), E[largest entry] (max_ratio), E[L1 norm] (l1_ratio),
 # E[L2 norm] (l2_ratio), E[RMS] (rms_ratio), E[standard deviation]
 # (std_ratio). Does nothing to the rest of the script either way - the
@@ -144,14 +264,15 @@ CHECK_MAGNITUDE_ON_ALL_ACTOR_RATIOS = False
 CHECK_MAGNITUDE_ON_ALL_MODELS = False
 
 # ----------------------------------------------------------------------
-# 1. Data: pulled live from Utilities.indifference_data.all_ratios(),
-#    which joins indifference_data.csv's (spec_fixed, spec_variable, M)
-#    rows against Utilities.weight_norm_data.csv's per-spec weight_norm/
-#    tau measurements and expected_magnitude()'s avg/max/sum ratios.
+# 1. Data: pulled from predictive_data.csv (File 3 of the current
+#    architecture), which already joins pair_data.csv's (spec_fixed,
+#    spec_variable, M) rows against group_data.csv's per-group weight-norm/
+#    tau-fit/expected-magnitude columns as ratio_* columns - see
+#    _load_ratios() above.
 # ----------------------------------------------------------------------
-RATIOS = idata.all_ratios(mc_kwargs={"samples": 500_000})
+RATIOS = _load_ratios()
 df_large = pd.DataFrame(RATIOS)
-print(f"Loaded {len(df_large)} pairs from Utilities.indifference_data "
+print(f"Loaded {len(df_large)} pairs from predictive_data.csv "
       f"({df_large['is_heatmap'].sum()} heatmap-involved, "
       f"{(~df_large['is_heatmap']).sum()} margin-only).")
 
@@ -662,7 +783,7 @@ print(f"RMSE: {np.sqrt((df['residual']**2).mean()):.5f}")
 # 6b. Proxy-magnitude-statistics check - only runs if
 #     CHECK_MAGNITUDE_PROXIES is True (see the config block at the top of
 #     this file). Reads df_large (the raw, un-logged ratios straight from
-#     Utilities.indifference_data) plus best_name/best_model (Section 3's
+#     predictive_data.csv, via _load_ratios()) plus best_name/best_model (Section 3's
 #     AIC-ranked selection) and prints a standalone report - doesn't
 #     modify df/df_plot/df_fit/models/best_model themselves, or anything
 #     below.
@@ -915,8 +1036,8 @@ def check_magnitude_proxies(df_large: pd.DataFrame, best_name=None, best_model=N
     E[average entry] (avg_ratio), E[largest entry] (max_ratio), E[L1
     norm] (l1_ratio), E[L2 norm] (l2_ratio), E[RMS] (rms_ratio),
     E[standard deviation] (std_ratio), all sourced from
-    Utilities.weight_norm_data.expected_magnitude() via
-    Utilities.indifference_data.compute_ratios():
+    group_data.py's build_group_row()/_math_metric_columns(), joined into
+    predictive_data.csv's ratio_* columns by build_predictive_data.py:
 
     1. UNIVARIATE - fit the SAME zero-intercept log-log model this file
        uses for X_COLUMN, ``logM = p * log(measure_ratio)``, alone, and
@@ -1209,7 +1330,7 @@ def fit_ratio_combo(df_large, terms, fit_mask=None, heldout_mask=None,
     saturation" matching this file's model-comparison table names).
 
     df_large should be the raw, un-logged ratio DataFrame (as produced by
-    Utilities.indifference_data.all_ratios(), e.g. this file's own
+    _load_ratios() (see above), e.g. this file's own
     `df_large`) - every input_col and target_col value is taken straight
     from it and log-transformed internally; rows are dropped if any
     needed column is missing or <= 0 (log requires positive input, same
@@ -1379,5 +1500,13 @@ ax2.set_title(f'Residuals for {best_name} vs {resid_x_label}{fit_note}')
 ax2.grid(alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('fit_log_y_clean.png', dpi=150)
+# 2026-08-19: save into eval_logs/ (this file's sibling directory, matching
+# every other plot output in this repo - sweep_summary_plot.png,
+# sweep_train_log_fit_plot.png, etc.) instead of dropping a PNG loose at
+# src/ top level. Resolved relative to THIS FILE's own location (not the
+# current working directory), so this works whether the script is run
+# as `python3 plot_M_fits` from src/ or invoked from elsewhere.
+_OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_logs")
+os.makedirs(_OUT_DIR, exist_ok=True)
+plt.savefig(os.path.join(_OUT_DIR, "fit_log_y_clean.png"), dpi=150)
 plt.show()
