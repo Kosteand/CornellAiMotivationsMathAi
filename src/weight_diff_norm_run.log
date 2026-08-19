@@ -402,3 +402,4 @@
 [402/1160] k_fixedmargin-9_k_variablemargin-2 order=fixed_first phase2_inactive_reward=0.0 rep=1 seed=1: diff_whole_model=2.2859 diff_actor=1.9356 diff_critic=1.2161 hit_rate_group2=0.000 choice_rate_group2=0.000
 [403/1160] k_fixedmargin-9_k_variablemargin-2 order=fixed_first phase2_inactive_reward=0.0 rep=2 seed=2: diff_whole_model=1.7757 diff_actor=1.3886 diff_critic=1.1068 hit_rate_group2=0.000 choice_rate_group2=0.000
 [404/1160] k_fixedmargin-9_k_variablemargin-2 order=fixed_first phase2_inactive_reward=0.0 rep=3 seed=3: diff_whole_model=1.8324 diff_actor=1.4214 diff_critic=1.1565 hit_rate_group2=0.000 choice_rate_group2=0.000
+[405/1160] k_fixedmargin-9_k_variablemargin-2 order=fixed_first phase2_inactive_reward=0.0 rep=4 seed=4: diff_whole_model=2.1993 diff_actor=1.8879 diff_critic=1.1283 hit_rate_group2=0.000 choice_rate_group2=0.000
