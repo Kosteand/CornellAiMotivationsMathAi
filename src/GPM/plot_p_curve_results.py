@@ -99,7 +99,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 from scipy.special import expit, gammaln
-from scipy.stats import norm
+from scipy.stats import norm, laplace, gennorm
 from statsmodels.tools.numdiff import approx_hess
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel
@@ -381,15 +381,50 @@ def _loglog_fn(z, C, M):
     return np.exp(-np.exp(np.clip(-C * (z - M), -50.0, 50.0)))
 
 
+def _laplace_fn(z, C, M):
+    # Laplace (double-exponential) CDF - same (C, M) = (slope, midpoint)
+    # parameterization as logistic/probit. Symmetric like both, but with
+    # EXPONENTIAL tails (matching the logistic's own tail decay rate)
+    # rather than the logistic's smooth peak or the probit's much
+    # lighter Gaussian tails - useful if the transition looks like it has
+    # a sharper "kink" right at the midpoint than either of those allow.
+    return laplace.cdf(C * (z - M))
+
+
+def _gennorm_fn(z, C, M, beta):
+    # Generalized normal / exponential power distribution CDF - same
+    # (C, M) slope/midpoint parameterization, PLUS a shape parameter
+    # `beta` controlling tail weight: beta=2 is exactly the normal
+    # (probit), beta=1 is the Laplace distribution above, beta>2 gives
+    # tails LIGHTER than probit, beta<1 gives tails heavier than Laplace.
+    # Always symmetric and unimodal in its own argument (density maximal
+    # at 0 for any beta>0), so unlike a plain power applied to the
+    # argument, this can't shift the curve's steepest point off the
+    # midpoint the way sign(z)|z|^b does.
+    return gennorm.cdf(C * (z - M), beta)
+
+
 def _sigmoid_init(z, y, weights):
-    """Shared initial guess/bounds for the three sigmoid-shaped models
-    (logistic, probit, cloglog, loglog) - all parameterized the same way,
-    (C, M) = (slope, midpoint-ish location in log(x))."""
+    """Shared initial guess/bounds for the sigmoid-shaped models
+    (logistic, probit, cloglog, loglog, laplace) - all parameterized the
+    same way, (C, M) = (slope, midpoint-ish location in log(x))."""
     C0 = 4.0 / max(z.max() - z.min(), 1e-6)  # a starter slope that spans the sampled range
     M0 = float(np.average(z, weights=weights))
     margin = max(z.max() - z.min(), 1.0) * 2.0
     bounds = [(1e-6, 1000.0), (z.min() - margin, z.max() + margin)]
     return [C0, M0], bounds
+
+
+def _gennorm_init(z, y, weights):
+    """Same (C, M) starting guess as _sigmoid_init, plus a starting
+    shape `beta=2.0` (i.e. start at the normal/probit-equivalent shape)
+    bounded to a reasonable range - not so close to 0 that the fit
+    degenerates, not so large it's effectively indistinguishable from a
+    step function."""
+    (C0, M0), cm_bounds = _sigmoid_init(z, y, weights)
+    beta0 = 2.0
+    bounds = cm_bounds + [(0.2, 10.0)]
+    return [C0, M0, beta0], bounds
 
 
 def _piecewise_linear_init(z, y, weights):
@@ -404,17 +439,28 @@ def _piecewise_linear_init(z, y, weights):
 
 SHAPE_MODELS = [
     {"name": "logistic", "fn": _logistic_fn, "param_names": ["C", "M"], "init": _sigmoid_init,
-     "describe": lambda p: f"slope C={p['C']:.4f}, midpoint log(x)={p['M']:.4f}"},
+     "describe": lambda p: f"slope C={p['C']:.4f}, midpoint log(x)={p['M']:.4f}",
+     "formula": lambda p: f"p(x) = 1 / (1 + exp(-({p['C']:.4f} * (log(x) - {p['M']:.4f}))))"},
     #{"name": "piecewise_linear", "fn": _piecewise_linear_fn, "param_names": ["x0_logx", "slope"],
     # "init": _piecewise_linear_init,
     # "describe": lambda p: f"ramp starts log(x)={p['x0_logx']:.4f}, slope={p['slope']:.4f} "
     #                        f"(hits 1 at log(x)={p['x0_logx'] + 1.0 / p['slope']:.4f})"},
     {"name": "probit", "fn": _probit_fn, "param_names": ["C", "M"], "init": _sigmoid_init,
-     "describe": lambda p: f"slope C={p['C']:.4f}, midpoint log(x)={p['M']:.4f}"},
+     "describe": lambda p: f"slope C={p['C']:.4f}, midpoint log(x)={p['M']:.4f}",
+     "formula": lambda p: f"p(x) = Phi({p['C']:.4f} * (log(x) - {p['M']:.4f}))  [Phi = standard normal CDF]"},
     #{"name": "cloglog", "fn": _cloglog_fn, "param_names": ["C", "M"], "init": _sigmoid_init,
     # "describe": lambda p: f"slope C={p['C']:.4f}, location log(x)={p['M']:.4f} (asymmetric: slow-then-fast)"},
     #{"name": "loglog", "fn": _loglog_fn, "param_names": ["C", "M"], "init": _sigmoid_init,
     # "describe": lambda p: f"slope C={p['C']:.4f}, location log(x)={p['M']:.4f} (asymmetric: fast-then-slow)"},
+    {"name": "laplace", "fn": _laplace_fn, "param_names": ["C", "M"], "init": _sigmoid_init,
+     "describe": lambda p: f"slope C={p['C']:.4f}, midpoint log(x)={p['M']:.4f}",
+     "formula": lambda p: f"p(x) = Laplace_CDF({p['C']:.4f} * (log(x) - {p['M']:.4f}))"},
+    {"name": "gennorm", "fn": _gennorm_fn, "param_names": ["C", "M", "beta"], "init": _gennorm_init,
+     "describe": lambda p: f"slope C={p['C']:.4f}, midpoint log(x)={p['M']:.4f}, "
+                            f"shape beta={p['beta']:.4f} (2=normal/probit-like, 1=Laplace-like, "
+                            f"<2=heavier tails, >2=lighter tails)",
+     "formula": lambda p: f"p(x) = GenNormal_CDF({p['C']:.4f} * (log(x) - {p['M']:.4f}); "
+                           f"beta={p['beta']:.4f})"},
 ]  # every candidate shape considered by fit_shape_diagnostic() - see its docstring.
    # Add a new one by giving it a model function (monotone, bounded [0,1]),
    # a param_names list, an init(z, y, weights) -> (x0_guess, bounds)
@@ -724,6 +770,13 @@ def plot_and_interpret(test_name, df, out_dir=PLOT_DIR, interval_row_budget=None
                   f"R2={r2_str}, McFadden pseudo-R2={pr2_str}, "
                   f"outside 95% CI band: {fo_str} - "
                   f"{m['describe']}{star}{conv_note}")
+        print("  fitted functions (x = original scale, log(x) is what was actually fit):")
+        for spec in SHAPE_MODELS:
+            m = models.get(spec["name"])
+            if not m or "error" in m or "formula" not in spec:
+                continue
+            star = " <- best AIC" if spec["name"] == shape.get("best_model") else ""
+            print(f"    {spec['name']}: {spec['formula'](m['params'])}{star}")
     print_interval_table(test_name, points_df, interval_row_budget)
     print(f"  saved plot -> {out_path}")
 

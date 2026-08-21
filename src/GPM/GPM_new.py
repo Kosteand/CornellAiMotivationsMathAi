@@ -7,6 +7,68 @@ import os
 import pytensor.tensor as pt
 
 # ----------------------------------------------------------------------
+# USER-SETTABLE OPTIONS
+# ----------------------------------------------------------------------
+# Everything in this block is meant to be edited directly, rather than
+# buried in the __main__ block below or in fit_beta_binomial_monotonic_gp's
+# own default arguments - per direct request, ALL user-settable options
+# live up here from now on (and should keep landing here for anything
+# added to this file in the future), not scattered further down.
+
+# --- which comparison(s) to run ---
+# If RUN_ALL_COMPARISONS is True, __main__ runs this fit on EVERY CSV
+# already sitting in p_curve_data/ (i.e. every comparison
+# sample_p_curve_adaptive.py/run_p_curve_experiments.py has already
+# sampled and plot_p_curve_results.py has already graphed - currently 7)
+# instead of just DEFAULT_TEST_NAME. Each one gets its own
+# outputs/<test_name>/ directory, same convention as the single-test case.
+RUN_ALL_COMPARISONS = False
+DEFAULT_TEST_NAME = "margin_vs_margin_harder_variable"  # used when RUN_ALL_COMPARISONS is False
+
+# --- shape-model overlay ---
+# When True, also fits plot_p_curve_results.py's SHAPE_MODELS (logistic,
+# probit, laplace, gennorm, plus whichever else is uncommented there) to
+# the SAME data and draws each successfully-fit curve on top of this
+# script's own GP plot - a direct visual "does the flexible GP agree
+# with any of the simple parametric shapes" check. Optional (default
+# off) since it pulls in plot_p_curve_results.py's own imports
+# (sklearn, statsmodels, scipy.optimize) and re-fits every shape model,
+# neither of which this script needs unless asked for.
+OVERLAY_SHAPE_FITS = False
+
+# --- data transformation ---
+LOG_TRANSFORM_X = True
+
+# --- model structure ---
+N_INDUCING = 30           # number of inducing points = monotone grid
+
+# --- MCMC settings ---
+TUNE = 1000
+DRAWS = 1000
+CHAINS = 4
+CORES = 1
+TARGET_ACCEPT = 0.99
+PREDICTION_SAMPLES = 200
+
+# --- priors for GP hyperparameters ---
+MEAN_C_SIGMA = 2.0
+LS_BETA = 1.0
+ETA_SIGMA = 2.0
+
+# --- priors for overdispersion ---
+LOG_PHI_MU = 1.0
+LOG_PHI_SIGMA = 1.0
+
+# --- prior for monotone increments and starting value ---
+INCREMENT_SIGMA = 1.0
+G0_SIGMA = 2.0
+
+# --- jitter / reproducibility ---
+JITTER = 1e-6
+RANDOM_SEED = 42
+
+
+# ----------------------------------------------------------------------
 # Kernel functions
 # ----------------------------------------------------------------------
 def matern32_cov_pt(X1, X2, ls, eta):
@@ -39,29 +101,32 @@ def fit_beta_binomial_monotonic_gp(
     csv_path: str,
     output_dir: str,
     # Data transformation
-    log_transform_x: bool = True,
+    log_transform_x: bool = LOG_TRANSFORM_X,
     # Model structure
-    n_inducing: int = 30,           # number of inducing points = monotone grid
+    n_inducing: int = N_INDUCING,           # number of inducing points = monotone grid
     # MCMC settings
-    tune: int = 1000,
-    draws: int = 1000,
-    chains: int = 4,
-    cores: int = 4,
-    target_accept: float = 0.95,
-    prediction_samples: int = 200,
+    tune: int = TUNE,
+    draws: int = DRAWS,
+    chains: int = CHAINS,
+    cores: int = CORES,
+    target_accept: float = TARGET_ACCEPT,
+    prediction_samples: int = PREDICTION_SAMPLES,
     # Priors for GP hyperparameters
-    mean_c_sigma: float = 2.0,
-    ls_beta: float = 1.0,
-    eta_sigma: float = 2.0,
+    mean_c_sigma: float = MEAN_C_SIGMA,
+    ls_beta: float = LS_BETA,
+    eta_sigma: float = ETA_SIGMA,
     # Priors for overdispersion
-    log_phi_mu: float = 1.0,
-    log_phi_sigma: float = 1.0,
+    log_phi_mu: float = LOG_PHI_MU,
+    log_phi_sigma: float = LOG_PHI_SIGMA,
     # Prior for monotone increments and starting value
-    increment_sigma: float = 1.0,
-    g0_sigma: float = 2.0,
+    increment_sigma: float = INCREMENT_SIGMA,
+    g0_sigma: float = G0_SIGMA,
     # Jitter
-    jitter: float = 1e-6,
-    random_seed: int = 42,
+    jitter: float = JITTER,
+    random_seed: int = RANDOM_SEED,
+    # Optional shape-model overlay (see OVERLAY_SHAPE_FITS at the top of
+    # this file)
+    overlay_shape_fits: bool = OVERLAY_SHAPE_FITS,
 ):
     """
     Fit a monotonic Beta-Binomial GP using a sparse GP with inducing points.
@@ -258,6 +323,35 @@ def fit_beta_binomial_monotonic_gp(
         alpha=0.25,
         label='95% credible interval',
     )
+
+    if overlay_shape_fits:
+        # Lazy import (only pulled in when this option is actually on -
+        # see OVERLAY_SHAPE_FITS at the top of this file) of
+        # plot_p_curve_results.py's own shape-fitting machinery, from its
+        # sibling location in this same GPM/ folder.
+        import sys
+        sys.path.insert(0, _HERE)
+        from plot_p_curve_results import per_point_summary, fit_shape_diagnostic, SHAPE_MODELS
+
+        points_df = per_point_summary(df)
+        shape = fit_shape_diagnostic(points_df)
+        shape_models = shape.get("models") or {}
+        shape_colors = {
+            "logistic": "tab:blue", "probit": "tab:green",
+            "laplace": "tab:orange", "gennorm": "tab:purple",
+        }
+        for spec in SHAPE_MODELS:
+            m = shape_models.get(spec["name"])
+            if not m or "error" in m:
+                continue
+            curve = spec["fn"](z_pred, *[m["params"][p] for p in spec["param_names"]])
+            is_best = spec["name"] == shape.get("best_model")
+            label = spec["name"] + (" (best AIC)" if is_best else "")
+            plt.plot(x_pred_raw, curve, color=shape_colors.get(spec["name"]),
+                      linewidth=2.0 if is_best else 1.2,
+                      linestyle="-" if is_best else "--",
+                      label=label, zorder=3)
+
     plt.xlabel('x (original scale)')
     plt.ylabel('P(choose variable)')
     plt.title('Monotonic sparse GP with Beta-Binomial likelihood')
@@ -308,27 +402,49 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC_ROOT = os.path.dirname(_HERE)  # src/ - the parent of GPM/
 
 if __name__ == "__main__":
-    params = {
-        "csv_path": os.path.join(_HERE, "p_curve_data", "margin_vs_margin_harder_variable.csv"),
-        "output_dir": os.path.join(_HERE, "outputs", "margin_vs_margin_harder_variable"),
-        "log_transform_x": True,
-        "n_inducing": 30,
-        "tune": 1000,
-        "draws": 1000,
-        "chains": 4,
-        "cores": 1,
-        "target_accept": 0.99,
-        "prediction_samples": 200,
-        "mean_c_sigma": 2.0,
-        "ls_beta": 1.0,
-        "eta_sigma": 2.0,
-        "log_phi_mu": 1.0,
-        "log_phi_sigma": 1.0,
-        "increment_sigma": 1.0,
-        "g0_sigma": 2.0,
-        "jitter": 1e-6,
-        "random_seed": 42,
-    }
+    # Every value plugged into `params` below (other than csv_path/
+    # output_dir, which are derived per test name) comes straight from
+    # the USER-SETTABLE OPTIONS block at the top of this file - edit
+    # there, not here.
+    if RUN_ALL_COMPARISONS:
+        import glob
+        test_names = sorted(
+            os.path.splitext(os.path.basename(p))[0]
+            for p in glob.glob(os.path.join(_HERE, "p_curve_data", "*.csv"))
+        )
+        if not test_names:
+            raise SystemExit(f"RUN_ALL_COMPARISONS is True but no CSVs were found in "
+                              f"{os.path.join(_HERE, 'p_curve_data')!r}.")
+    else:
+        test_names = [DEFAULT_TEST_NAME]
 
-    trace, mu_mean, mu_lower, mu_upper = fit_beta_binomial_monotonic_gp(**params)
+    print(f"Running on {len(test_names)} comparison(s): {test_names}")
+
+    for test_name in test_names:
+        params = {
+            "csv_path": os.path.join(_HERE, "p_curve_data", f"{test_name}.csv"),
+            "output_dir": os.path.join(_HERE, "outputs", test_name),
+            "log_transform_x": LOG_TRANSFORM_X,
+            "n_inducing": N_INDUCING,
+            "tune": TUNE,
+            "draws": DRAWS,
+            "chains": CHAINS,
+            "cores": CORES,
+            "target_accept": TARGET_ACCEPT,
+            "prediction_samples": PREDICTION_SAMPLES,
+            "mean_c_sigma": MEAN_C_SIGMA,
+            "ls_beta": LS_BETA,
+            "eta_sigma": ETA_SIGMA,
+            "log_phi_mu": LOG_PHI_MU,
+            "log_phi_sigma": LOG_PHI_SIGMA,
+            "increment_sigma": INCREMENT_SIGMA,
+            "g0_sigma": G0_SIGMA,
+            "jitter": JITTER,
+            "random_seed": RANDOM_SEED,
+            "overlay_shape_fits": OVERLAY_SHAPE_FITS,
+        }
+
+        print(f"\n=== {test_name} ===")
+        trace, mu_mean, mu_lower, mu_upper = fit_beta_binomial_monotonic_gp(**params)
+
     print("Fitting complete.")

@@ -60,14 +60,39 @@ from data.pair_data import migrate_from_legacy_indifference_data
 from data.build_predictive_data import build_predictive_data
 
 COMPARISONS = [
-    # --- margin vs. margin, default hyperparameters/model size ---
+    # --- the 7 comparisons graphed via GPM/run_p_curve_experiments.py's
+    # TESTS - added so every one of those 7 has its "standard data" (math
+    # metrics + trained actor/critic weight norms) in group_data.csv, the
+    # same way the two comparisons below already do. Only 3 of these 7
+    # actually need new training (margin k=1/err=0.2, margin k=5/s=5.0,
+    # margin k=1/g=8 have never been trained) - the rest dedupe against
+    # specs already in group_data.csv and are included anyway so this
+    # list is a complete, one-to-one mirror of TESTS.
+
+    # 1. margin_vs_margin_baseline (fixed==variable, same spec both
+    #    sides - sanity check test, crossing should land at x=1.0)
+    (
+        MarginGroup(g=4, k=1.0, value=1.0),
+        MarginGroup(g=4, k=1.0, value=1.0),
+        None,
+    ),
+
+    # 2. margin_vs_margin_harder_variable - already trained; kept as-is.
     (
         MarginGroup(g=4, k=1.0, value=1.0),
         MarginGroup(g=4, k=4.0, value=1.0),
         None,
     ),
 
-    # --- heatmap vs. heatmap, a custom (bigger) model + longer budget ---
+    # 3. margin_vs_heatmap (cross-family comparison)
+    (
+        MarginGroup(g=4, k=1.0, value=1.0),
+        HeatmapGroup(g=4, noise_scale=1.0, n=3, value=1.0),
+        None,
+    ),
+
+    # 4. heatmap_vs_heatmap_harder_variable - already trained; kept as-is
+    #    (custom bigger model + longer budget, per its original entry).
     (
         HeatmapGroup(g=4, noise_scale=1.0, n=2, value=1.0),
         HeatmapGroup(g=4, noise_scale=1.0, n=6, value=1.0),
@@ -76,6 +101,32 @@ COMPARISONS = [
             "net_arch_pi": (128, 64),
             "net_arch_vf": (128, 64),
         },
+    ),
+
+    # 5. margin_vs_margin_label_noise - variable side (err=0.2) is new,
+    #    never trained.
+    (
+        MarginGroup(g=4, k=1.0, value=1.0, err=0.0),
+        MarginGroup(g=4, k=1.0, value=1.0, err=0.2),
+        None,
+    ),
+
+    # 6. margin_vs_margin_scale_mismatch - variable side (k=5, s=5.0) is
+    #    new, never trained.
+    (
+        MarginGroup(g=4, k=1.0, value=1.0, s=1.0),
+        MarginGroup(g=4, k=5.0, value=1.0, s=5.0),
+        None,
+    ),
+
+    # 7. margin_vs_margin_more_options - variable side (g=8) is new,
+    #    never trained; note this is the one spec here that ISN'T g=4,
+    #    so it won't be usable for anything that assumes the project-wide
+    #    g=4 convention (e.g. the weight-diff-norm replicate pipeline).
+    (
+        MarginGroup(g=4, k=1.0, value=1.0),
+        MarginGroup(g=8, k=1.0, value=1.0),
+        None,
     ),
 
     # Add more (fixed_group, variable_group, hyperparameters) tuples here.
